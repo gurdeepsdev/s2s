@@ -181,7 +181,7 @@ exports.generatePublisherLink = (req, res) => {
         `&gaid={gaid}` +
         `&cid={click_id}` +
         `&sub_pub={sub_pub}` +
-        `&source=${publisher_id}_{source}`;
+        `&source={source}`;
 
       // 3️⃣ Always insert new campaign row
       const insertSQL = `

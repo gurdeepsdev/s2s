@@ -1,5 +1,6 @@
 const db = require("../config/db");
 const crypto = require("crypto");
+const axios = require("axios");
 
 
 // ⭐ Your base postback route
@@ -209,20 +210,23 @@ exports.generatePublisherLink = (req, res) => {
 };
 
 
-
 exports.handlePostback = async (req, res) => {
   try {
     const advertiserClickId = req.query.click_id;
-    const payout = req.query.payout || 0;
-    const advKey = req.query.adv_key;  
+    const payout = Number(req.query.payout || 0);
+    const advKey = req.query.adv_key;
 
     if (!advertiserClickId || !advKey) {
       return res.status(400).send("Missing required params");
     }
-console.log("Postback received:", advertiserClickId,advKey,payout);
-    // 1️⃣ Validate advertiser using adv_key
-    const advSql = `SELECT * FROM advertiser_links WHERE adv_key = ? LIMIT 1`;
-    const [advRows] = await db.promise().query(advSql, [advKey]);
+
+    console.log("📩 Postback received:", advertiserClickId, advKey, payout);
+
+    // 1️⃣ Validate advertiser
+    const [advRows] = await db.promise().query(
+      `SELECT campaign_id FROM advertiser_links WHERE adv_key = ? LIMIT 1`,
+      [advKey]
+    );
 
     if (advRows.length === 0) {
       return res.status(404).send("Invalid advertiser");
@@ -230,49 +234,176 @@ console.log("Postback received:", advertiserClickId,advKey,payout);
 
     const campaignId = advRows[0].campaign_id;
 
-    // 2️⃣ Find internal click using advertiser click id
-    const clickSql = `
-      SELECT * FROM clicks 
-      WHERE advertiser_click_id = ? AND campaign_id = ? 
-      LIMIT 1
-    `;
-    const [clickRows] = await db.promise().query(clickSql, [advertiserClickId, campaignId]);
+    // 2️⃣ Find click
+    const [clickRows] = await db.promise().query(
+      `SELECT * FROM clicks 
+       WHERE advertiser_click_id = ? AND campaign_id = ?
+       LIMIT 1`,
+      [advertiserClickId, campaignId]
+    );
 
     if (clickRows.length === 0) {
       return res.status(404).send("Click not found");
     }
 
-    const internalClickId = clickRows[0].click_id;
+    const click = clickRows[0];
 
-    // 3️⃣ Prevent duplicate conversions
-    const dupSql = `
-      SELECT id FROM conversions 
-      WHERE advertiser_click_id = ? LIMIT 1
-    `;
-    const [dupCheck] = await db.promise().query(dupSql, [advertiserClickId]);
+    // 3️⃣ Duplicate conversion protection
+    const [dupCheck] = await db.promise().query(
+      `SELECT id FROM conversions WHERE advertiser_click_id = ? LIMIT 1`,
+      [advertiserClickId]
+    );
 
     if (dupCheck.length > 0) {
       return res.status(200).send("Duplicate conversion ignored");
     }
 
     // 4️⃣ Insert conversion
-    const insertSql = `
-      INSERT INTO conversions 
-      (click_id, advertiser_click_id, campaign_id, payout, adv_key)
-      VALUES (?, ?, ?, ?, ?)
-    `;
+    const [convResult] = await db.promise().query(
+      `INSERT INTO conversions
+       (click_id, advertiser_click_id, campaign_id, payout, publisher_id, adv_key, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'approved', NOW())`,
+      [
+        click.click_id,
+        advertiserClickId,
+        campaignId,
+        payout,
+        click.publisher_id,
+        advKey
+      ]
+    );
 
-    await db.promise().query(insertSql, [
-      internalClickId,
-      advertiserClickId,
-      campaignId,
-      payout,
-      advKey
-    ]);
+    const conversionId = convResult.insertId;
+    console.log("✅ Conversion saved:", conversionId);
 
-    res.status(200).send("OK");
+    // 5️⃣ Insert wallet (independent of postback)
+    try {
+      await db.promise().query(
+        `INSERT INTO wallet (publisher_id, conversion_id, amount)
+         VALUES (?, ?, ?)`,
+        [click.publisher_id, conversionId, payout]
+      );
+      console.log("✅ Wallet credited");
+    } catch (walletErr) {
+      console.error("❌ Wallet insert failed:", walletErr.sqlMessage);
+    }
+
+    // 6️⃣ Fire publisher postback (async, non-blocking)
+    firePublisherPostback({
+      campaign_id: campaignId,
+      publisher_id: click.publisher_id,
+      click_id: click.click_id,
+      payout
+    });
+
+    return res.status(200).send("OK");
+
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Server error");
+    console.error("❌ Postback handler error:", err);
+    return res.status(500).send("Server error");
   }
 };
+async function firePublisherPostback({ campaign_id, publisher_id, click_id, payout }) {
+  try {
+    console.log("🔔 Checking publisher postback:", { campaign_id, publisher_id });
+
+    const [rows] = await db.promise().query(
+      `SELECT postback_url
+       FROM publisher_links
+       WHERE campaign_id = ? AND publisher_id = ?
+       LIMIT 1`,
+      [campaign_id, publisher_id]
+    );
+
+    if (rows.length === 0) {
+      console.log("ℹ️ Publisher link row not found");
+      return;
+    }
+
+    const postbackUrl = rows[0].postback_url;
+
+    if (!postbackUrl) {
+      console.log("ℹ️ Publisher postback URL not configured");
+      return;
+    }
+
+    const finalUrl = postbackUrl
+      .replace("{click_id}", click_id)
+      .replace("{payout}", payout);
+
+    await axios.get(finalUrl, { timeout: 4000 });
+
+    console.log("✅ Publisher postback fired:", finalUrl);
+
+  } catch (e) {
+    console.error("❌ Publisher postback failed:", e.message);
+  }
+}
+
+
+// exports.handlePostback = async (req, res) => {
+//   try {
+//     const advertiserClickId = req.query.click_id;
+//     const payout = req.query.payout || 0;
+//     const advKey = req.query.adv_key;  
+
+//     if (!advertiserClickId || !advKey) {
+//       return res.status(400).send("Missing required params");
+//     }
+// console.log("Postback received:", advertiserClickId,advKey,payout);
+//     // 1️⃣ Validate advertiser using adv_key
+//     const advSql = `SELECT * FROM advertiser_links WHERE adv_key = ? LIMIT 1`;
+//     const [advRows] = await db.promise().query(advSql, [advKey]);
+
+//     if (advRows.length === 0) {
+//       return res.status(404).send("Invalid advertiser");
+//     }
+
+//     const campaignId = advRows[0].campaign_id;
+
+//     // 2️⃣ Find internal click using advertiser click id
+//     const clickSql = `
+//       SELECT * FROM clicks 
+//       WHERE advertiser_click_id = ? AND campaign_id = ? 
+//       LIMIT 1
+//     `;
+//     const [clickRows] = await db.promise().query(clickSql, [advertiserClickId, campaignId]);
+
+//     if (clickRows.length === 0) {
+//       return res.status(404).send("Click not found");
+//     }
+
+//     const internalClickId = clickRows[0].click_id;
+
+//     // 3️⃣ Prevent duplicate conversions
+//     const dupSql = `
+//       SELECT id FROM conversions 
+//       WHERE advertiser_click_id = ? LIMIT 1
+//     `;
+//     const [dupCheck] = await db.promise().query(dupSql, [advertiserClickId]);
+
+//     if (dupCheck.length > 0) {
+//       return res.status(200).send("Duplicate conversion ignored");
+//     }
+
+//     // 4️⃣ Insert conversion
+//     const insertSql = `
+//       INSERT INTO conversions 
+//       (click_id, advertiser_click_id, campaign_id, payout, adv_key)
+//       VALUES (?, ?, ?, ?, ?)
+//     `;
+
+//     await db.promise().query(insertSql, [
+//       internalClickId,
+//       advertiserClickId,
+//       campaignId,
+//       payout,
+//       advKey
+//     ]);
+
+//     res.status(200).send("OK");
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).send("Server error");
+//   }
+// };

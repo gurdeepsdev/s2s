@@ -4,7 +4,7 @@ const axios = require("axios");
 
 
 // ⭐ Your base postback route
-const POSTBACK_BASE = "https://pidmetric.com/postback"; 
+const POSTBACK_BASE = "https://track.pidmetric.com/postback"; 
 // change to your actual domain later
 // Generate unique advertiser key
 function generateAdvertiserKey() {
@@ -175,7 +175,7 @@ exports.generatePublisherLink = (req, res) => {
 
       // 2️⃣ Build tracking link (industry-style)
       const generatedLink =
-        `https://pidmetric.com/click/${publisherHandle}` +
+        `https://track.pidmetric.com/click/${publisherHandle}` +
         `?campaign_id=${campaign_id}` +
         `&pub_id=${publisher_id}` +
         `&gaid={gaid}` +

@@ -14,7 +14,7 @@ function generateAdvertiserKey() {
 exports.saveAdvertiserLink = (req, res) => {
   const { campaign_id, advertiser_link, adv_id, click_id_param ,pubid} = req.body;
 
-  if (!campaign_id || !advertiser_link || !adv_id || !click_id_param) {
+  if (!campaign_id  || !adv_id || !click_id_param) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 

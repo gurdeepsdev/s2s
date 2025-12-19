@@ -154,7 +154,7 @@ function generatePublisherHandle() {
 }
 
 exports.generatePublisherLink = (req, res) => {
-  const { campaign_id, publisher_id } = req.body;
+  const { campaign_id, publisher_id, hide_referrer } = req.body;
 
   if (!campaign_id || !publisher_id) {
     return res.status(400).json({ error: "campaign_id and publisher_id required" });
@@ -186,13 +186,13 @@ exports.generatePublisherLink = (req, res) => {
       // 3️⃣ Always insert new campaign row
       const insertSQL = `
         INSERT INTO publisher_links
-        (campaign_id, publisher_id, publisher_handle, generated_link)
-        VALUES (?, ?, ?, ?)
+        (campaign_id, publisher_id, publisher_handle, generated_link, hide_referrer)
+        VALUES (?, ?, ?, ?, ?)
       `;
 
       db.query(
         insertSQL,
-        [campaign_id, publisher_id, publisherHandle, generatedLink],
+        [campaign_id, publisher_id, publisherHandle, generatedLink, hide_referrer ? 1 : 0],
         (err2) => {
           if (err2) return res.status(500).json({ error: err2 });
 

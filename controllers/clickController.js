@@ -3,9 +3,12 @@ const db = require("../config/db");
 const crypto = require("crypto");
 
 exports.trackClick = (req, res) => {
-  const { publisher_handle } = req.params;
-  const { cid, pub_id, subpub, gaid, idfa, source } = req.query;
-
+  const { publisher_handle} = req.params;
+  const { cid, pub_id, subpub, gaid, idfa, source, campaign_id } = req.query;
+console.log("campaign_id",campaign_id,publisher_handle)
+  if (!campaign_id) {
+    return res.status(400).send("Missing campaign_id");
+  }
   if (!cid) {
     return res.status(400).send("Missing click id");
   }
@@ -23,13 +26,12 @@ exports.trackClick = (req, res) => {
     `SELECT campaign_id, publisher_id, hide_referrer
      FROM publisher_links
      WHERE publisher_handle = ?
+       AND campaign_id = ?
      LIMIT 1`,
-    [publisher_handle],
-
+    [publisher_handle, campaign_id],
     (err, pubRows) => {
       if (err || pubRows.length === 0) {
-        console.error(err);
-        return res.status(404).send("Invalid tracking link");
+        return res.status(404).send("Invalid tracking link or campaign");
       }
 
       const { campaign_id, publisher_id, hide_referrer } = pubRows[0];

@@ -109,6 +109,7 @@ async function firePublisherPostback({ campaign_id, publisher_id, click_id, payo
 exports.updatePlaceLink = (req, res) => {
   try {
     const { pub_id, user_id, place_link } = req.body;
+console.log("api hit",req.body);
 
     // ✅ Basic validation
     if (!pub_id || !user_id || !place_link) {
@@ -123,6 +124,7 @@ exports.updatePlaceLink = (req, res) => {
       SET postback_url = ?, user_id = ?, updated_at = NOW()
       WHERE publisher_id = ?
     `;
+    console.log("query running");
 
     db.query(sql, [place_link, user_id, pub_id], (err, result) => {
       if (err) {

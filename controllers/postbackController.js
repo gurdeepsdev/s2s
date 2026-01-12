@@ -106,6 +106,56 @@ async function firePublisherPostback({ campaign_id, publisher_id, click_id, payo
 }
 
 
+exports.updatePlaceLink = (req, res) => {
+  try {
+    const { pub_id, user_id, place_link } = req.body;
+
+    // ✅ Basic validation
+    if (!pub_id || !user_id || !place_link) {
+      return res.status(400).json({
+        success: false,
+        message: 'pub_id, user_id, and place_link are required'
+      });
+    }
+
+    const sql = `
+      UPDATE publisher_links
+      SET postback_url = ?, user_id = ?, updated_at = NOW()
+      WHERE publisher_id = ?
+    `;
+
+    db.query(sql, [place_link, user_id, pub_id], (err, result) => {
+      if (err) {
+        console.error('updatePlaceLink DB error:', err);
+        return res.status(500).json({
+          success: false,
+          message: 'Database error'
+        });
+      }
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Publisher not found'
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: 'Postback URL updated successfully'
+      });
+    });
+
+  } catch (error) {
+    console.error('updatePlaceLink error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+
 
 // exports.handlePostback = (req, res) => {
 //   const { clickid, conversion_id, payout } = req.query;

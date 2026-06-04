@@ -238,6 +238,16 @@ exports.generatePublisherLink = (req, res) => {
       `&sub_pub={sub_pub}` +
       `&source={source}`;
 
+    // 2b️⃣ Build impression tracking link (parallel pipeline, same params)
+    const impressionLink =
+      `https://track.pidmetric.com/impression/${publisherHandle}` +
+      `?campaign_id=${campaign_id}` +
+      `&pub_id=${publisher_id}` +
+      `&gaid={gaid}` +
+      `&imp_id={imp_id}` +
+      `&sub_pub={sub_pub}` +
+      `&source={source}`;
+
     // 3️⃣ Insert new campaign row WITH SAME postback_url
     const insertSQL = `
       INSERT INTO publisher_links
@@ -246,10 +256,11 @@ exports.generatePublisherLink = (req, res) => {
         publisher_id,
         publisher_handle,
         generated_link,
+        impression_link,
         postback_url,
         hide_referrer
       )
-      VALUES (?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `;
 
     db.query(
@@ -259,6 +270,7 @@ exports.generatePublisherLink = (req, res) => {
         publisher_id,
         publisherHandle,
         generatedLink,
+        impressionLink,
         postbackUrl,
         hide_referrer ? 1 : 0
       ],
@@ -279,6 +291,7 @@ exports.generatePublisherLink = (req, res) => {
              publisher_handle: publisherHandle,
              postback_url: postbackUrl,
              publisher_link: generatedLink,
+             impression_link: impressionLink,
        
              // ✅ Correct value
              publisher_offer_api: publisherApiUrl

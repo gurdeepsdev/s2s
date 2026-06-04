@@ -8,6 +8,8 @@ app.use(express.json());
 app.use("/campaign", require("./routes/campaignRoutes"));
 app.use("/link", require("./routes/linkRoutes"));
 app.use("/", require("./routes/clickRoutes"));
+app.use("/", require("./routes/impressionRoutes"));
+
 app.use("/postback", require("./routes/postbackRoutes"));
 app.use("/publisher", require("./routes/publisherRoutes"));
 

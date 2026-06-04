@@ -14,7 +14,7 @@ function generateAdvertiserKey() {
 exports.saveAdvertiserLink = (req, res) => {
   const { campaign_id, advertiser_link, adv_id, click_id_param ,pubid} = req.body;
 
-  if (!campaign_id  || !adv_id || !click_id_param) {
+  if ( !adv_id) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
@@ -39,7 +39,7 @@ exports.saveAdvertiserLink = (req, res) => {
       else {
         advKey = generateAdvertiserKey();
         postbackURL =
-          `${POSTBACK_BASE}?${click_id_param}={click_id}&payout={payout}&adv_key=${advKey}`;
+          `${POSTBACK_BASE}?${click_id_param}={click_id}&payout={payout}&adv_key=${advKey}&event={}`;
       }
 
       // 4️⃣ ALWAYS insert new row with new advertiser_link
@@ -149,11 +149,231 @@ exports.saveAdvertiserLink = (req, res) => {
 //   });
 // };
 
+
 function generatePublisherHandle() {
   return "PU-" + crypto.randomBytes(4).toString("hex");
 }
 
+function generatePublisherApiUrl(publisher_id) {
+  return new Promise((resolve, reject) => {
+
+    // 1️⃣ check if token already exists for this publisher
+    const sql = `
+      SELECT api_token
+      FROM publisher_links
+      WHERE publisher_id = ?
+      AND api_token IS NOT NULL
+      LIMIT 1
+    `;
+
+    db.query(sql, [publisher_id], (err, rows) => {
+      if (err) return reject(err);
+
+      let token;
+
+      // 2️⃣ if token already exists → reuse it
+      if (rows.length > 0) {
+        token = rows[0].api_token;
+      } else {
+        token = "PT-" + crypto.randomBytes(16).toString("hex");
+      }
+
+      const apiUrl = `https://track.pidmetric.com/api/publisher/offers?token=${token}`;
+
+      // 3️⃣ ensure ALL rows of this publisher have same token + api_url
+      const updateSQL = `
+        UPDATE publisher_links
+        SET api_token = ?, api_url = ?
+        WHERE publisher_id = ?
+      `;
+
+      db.query(updateSQL, [token, apiUrl, publisher_id], (err2) => {
+        if (err2) return reject(err2);
+
+        resolve(apiUrl);
+      });
+
+    });
+
+  });
+}
+
 exports.generatePublisherLink = (req, res) => {
+  const { campaign_id, publisher_id, hide_referrer } = req.body;
+
+  if (!campaign_id || !publisher_id) {
+    return res.status(400).json({
+      success: false,
+      message: "campaign_id and publisher_id required"
+    });
+  }
+
+  // 1️⃣ Fetch publisher-level data (handle + postback)
+  const fetchSQL = `
+    SELECT publisher_handle, postback_url
+    FROM publisher_links
+    WHERE publisher_id = ?
+    LIMIT 1
+  `;
+
+  db.query(fetchSQL, [publisher_id], (err, rows) => {
+    if (err) return res.status(500).json({ success:false, error: err });
+
+    const publisherHandle =
+      rows.length > 0
+        ? rows[0].publisher_handle
+        : generatePublisherHandle();
+
+    const postbackUrl =
+      rows.length > 0
+        ? rows[0].postback_url
+        : null;
+    // 2️⃣ Build tracking link
+    const generatedLink =
+      `https://track.pidmetric.com/click/${publisherHandle}` +
+      `?campaign_id=${campaign_id}` +
+      `&pub_id=${publisher_id}` +
+      `&gaid={gaid}` +
+      `&cid={click_id}` +
+      `&sub_pub={sub_pub}` +
+      `&source={source}`;
+
+    // 3️⃣ Insert new campaign row WITH SAME postback_url
+    const insertSQL = `
+      INSERT INTO publisher_links
+      (
+        campaign_id,
+        publisher_id,
+        publisher_handle,
+        generated_link,
+        postback_url,
+        hide_referrer
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
+
+    db.query(
+      insertSQL,
+      [
+        campaign_id,
+        publisher_id,
+        publisherHandle,
+        generatedLink,
+        postbackUrl,
+        hide_referrer ? 1 : 0
+      ],
+      (err2) => {
+        if (err2) return res.status(500).json({ success:false, error: err2 });
+
+         // ✅ CREATE PUBLISHER API URL HERE
+        //  const publisherApiUrl = generatePublisherApiUrl(publisher_id);
+         generatePublisherApiUrl(publisher_id)
+         .then((publisherApiUrl) => {
+       
+           return res.json({
+             success: true,
+             message: rows.length > 0
+               ? "New campaign link created using existing publisher postback"
+               : "Publisher created & first campaign link added",
+       
+             publisher_handle: publisherHandle,
+             postback_url: postbackUrl,
+             publisher_link: generatedLink,
+       
+             // ✅ Correct value
+             publisher_offer_api: publisherApiUrl
+           });
+       
+         })
+         .catch((err3) => {
+           return res.status(500).json({ success:false, error: err3 });
+         });
+        // return res.json({
+        //   success: true,
+        //   message: rows.length > 0
+        //     ? "New campaign link created using existing publisher postback"
+        //     : "Publisher created & first campaign link added",
+        //   publisher_handle: publisherHandle,
+        //   postback_url: postbackUrl,
+        //   publisher_link: generatedLink,
+
+        //   // ✅ SHOW THIS TO USER
+        //   publisher_offer_api: publisherApiUrl
+        // });
+      }
+    );
+  });
+};
+
+async function getPublisherCampaigns(publisher_id) {
+
+  const sql = `
+    SELECT
+      campaign_id,
+      generated_link,
+      publisher_handle,
+      hide_referrer
+    FROM publisher_links
+    WHERE publisher_id = ?
+  `;
+
+  const [rows] = await db.promise().query(sql, [publisher_id]);
+
+  return rows;
+}
+
+
+
+//get publisher data with this token and return all campaigns linked to this publisher
+exports.getPublisherOffers = async (req, res) => {
+  try {
+
+    const { token } = req.query;
+console.log("Received token:", token);
+    if (!token) {
+      return res.status(400).json({
+        success:false,
+        message:"token required"
+      });
+    }
+
+    // 1️⃣ Validate token
+    const [publisher] = await db.promise().query(
+      "SELECT publisher_id FROM publisher_links WHERE api_token = ? LIMIT 1",
+      [token]
+    );
+
+    if (publisher.length === 0) {
+      return res.status(401).json({
+        success:false,
+        message:"Invalid token"
+      });
+    }
+
+    const publisher_id = publisher[0].publisher_id;
+console.log("Valid token for publisher_id:", publisher_id);
+    // 2️⃣ Fetch campaigns
+    const campaigns = await getPublisherCampaigns(publisher_id);
+
+    return res.json({
+      success:true,
+      publisher_id,
+      total: campaigns.length,
+      campaigns
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      success:false,
+      error: err.message
+    });
+  }
+}; 
+
+
+
+//old
+exports.eneratePublisherLink = (req, res) => {
   const { campaign_id, publisher_id, hide_referrer } = req.body;
 
   if (!campaign_id || !publisher_id) {
@@ -212,8 +432,17 @@ exports.generatePublisherLink = (req, res) => {
 
 exports.handlePostback = async (req, res) => {
   try {
-    const advertiserClickId = req.query.click_id;
-    const payout = Number(req.query.payout || 0);
+   //    const advertiserClickId = req.query.click_id;
+  const advertiserClickId =
+  req.query.click_id ||
+  req.query.clickid ||
+  req.query.irclickid ||
+  req.query.af_click_id ||
+  req.query.subid;
+
+console.log("Incoming Postback ID:", advertiserClickId);   
+
+ const payout = Number(req.query.payout || 0);
     const advKey = req.query.adv_key;
 
     if (!advertiserClickId || !advKey) {

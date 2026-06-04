@@ -1,18 +1,249 @@
 const db = require("../config/db");
 const axios = require("axios");
 
+
+
+
 exports.handlePostback = async (req, res) => {
   try {
-    const { clickid, conversion_id, payout } = req.query;
+    // 🔹 Capture Full Incoming URL
+    const incomingUrl = req.protocol + '://' + req.get('host') + req.originalUrl;
 
-    if (!clickid) {
+    // 🔹 Capture IP Address
+    const ipAddress = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+    // 🔹 Capture User Agent
+    const userAgent = req.headers['user-agent'];
+
+    console.log("📥 Incoming Postback URL:", incomingUrl);
+    console.log("🌍 IP:", ipAddress);
+    console.log("🧠 User Agent:", userAgent);
+
+   // const { click_id, conversion_id, payout, event_goal, event, p1,p2,p3,p4,p5  } = req.query;
+
+    // const { click_id, conversion_id, payout, event_goal, event,p1,p2,p3,p4,p5 } = req.query;
+    let { click_id, conversion_id, payout, event_goal, event,p1,p2,p3,p4,p5 } = req.query;
+
+    // treat empty event as install
+    event = event && event.trim() !== "" ? event : "install";    // let { click_id, conversion_id, payout, event_goal, event } = req.query;
+
+
+    if (!click_id) {
+      return res.status(400).json({ error: "clickid required" });
+    }
+
+   // 🔹 Sanitize payout (OPTIONAL FIELD)
+    const numericPayout = parseFloat(payout);
+    let finalPayout = null;
+
+    if (!isNaN(numericPayout)) {
+      finalPayout = numericPayout;
+    }
+
+
+    // 1️⃣ Find click
+    const [clickRows] = await db.promise().query(
+      "SELECT * FROM clicks WHERE advertiser_click_id = ? LIMIT 1",
+      [click_id]
+    );
+
+    if (clickRows.length === 0) {
+      return res.status(400).json({ error: "Click not found" });
+    }
+
+    const click = clickRows[0];
+
+    // 2️⃣ Insert conversion (SAVE BOTH event_goal + event)
+    const [conversionResult] = await db.promise().query(
+      `INSERT INTO conversions
+       (campaign_id, click_id, advertiser_click_id, conversion_id, payout, publisher_id, event_goal, event, status, incomingUrl,p1,p2,p3,p4,p5, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?,?, NOW())`,
+      [
+        click.campaign_id,
+        click.click_id,
+        click.advertiser_click_id,
+        conversion_id || null,
+        finalPayout,              // can be NULL safely
+        click.publisher_id,
+        event_goal || null,   // OLD FIELD
+        event || null,        // NEW FIELD
+        'received',
+        incomingUrl,
+        p1,p2,p3,p4,p5 
+      ]
+    );
+
+    const conversionId = conversionResult.insertId;
+    console.log("✅ Conversion saved:", conversionId);
+
+    /**
+     * From here onward use ONLY `event`
+     * event_goal remains untouched for old logic & reports
+     */
+
+    // 3️⃣ Count today's conversions (NEW event-based logic)
+    const [[{ total }]] = await db.promise().query(
+      `SELECT COUNT(*) AS total
+       FROM conversions
+       WHERE campaign_id = ?
+       AND event = ?
+       AND DATE(created_at) = CURDATE()`,
+      [click.campaign_id, event]
+    );
+
+    console.log("📊 Total conversions today (event):", total);
+ 
+
+
+    // 4️⃣ First 2 conversions always fire
+    if (total <= 10) {
+      firePublisherPostback({
+        campaign_id: click.campaign_id,
+        publisher_id: click.publisher_id,
+        click_id: click.click_id,
+        payout: finalPayout ?? 0,   // send 0 if invalid
+        event
+      });
+
+      return res.json({ message: "Conversion saved & fired (initial pass)" });
+    }
+
+    // 5️⃣ pass_post_back check
+    const [[passRule]] = await db.promise().query(
+      `SELECT is_pass FROM pass_post_back
+       WHERE campaign_id = ? AND event_name = ? LIMIT 1`,
+      [click.campaign_id, event]
+    );
+
+    if (!passRule || passRule.is_pass === 0) {
+      console.log("🚫 Blocked by pass_post_back");
+      return res.json({ message: "Conversion saved (event blocked)" });
+    }
+
+    // 6️⃣ Sampling logic after 5 conversions
+    if (total >= 20) {
+      const [[samplingRule]] = await db.promise().query(
+        `SELECT sampling_percentage FROM sampling
+         WHERE campaign_id = ? AND event_name = ? LIMIT 1`,
+        [click.campaign_id, event]
+      );
+
+      const samplingPercentage = samplingRule?.sampling_percentage || 100;
+      const rand = Math.random() * 100;
+
+      if (rand <= samplingPercentage) {
+        firePublisherPostback({
+          campaign_id: click.campaign_id,
+          publisher_id: click.publisher_id,
+          click_id: click.click_id,
+          payout: finalPayout ?? 0,   // send 0 if invalid
+          event
+        });
+
+        return res.json({ message: "Conversion fired (sampling pass)" });
+      } else {
+        console.log("⛔ Dropped by sampling");
+        return res.json({ message: "Conversion saved (sampling dropped)" });
+      }
+    }
+
+    // 7️⃣ Cooldown phase (3rd & 4th conversion)
+    return res.json({ message: "Conversion saved (cooldown phase)" });
+
+  } catch (err) {
+    console.error("❌ Postback handler error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+
+
+
+async function firePublisherPostback({ campaign_id, publisher_id, click_id, payout, event }) {
+  try {
+
+    if (!click_id) {
+      console.log("❌ Missing click_id. Postback skipped.");
+      return;
+    }
+
+    const [rows] = await db.promise().query(
+      `SELECT postback_url
+       FROM publisher_links
+       WHERE campaign_id = ? AND publisher_id = ?
+       LIMIT 1`,
+      [campaign_id, publisher_id]
+    );
+
+console.log(rows,"new",campaign_id,publisher_id)
+    if (!rows.length || !rows[0].postback_url) {
+      console.log("❌ No postback_url found for campaign:", campaign_id);
+      return;
+    }
+
+    let finalUrl = rows[0].postback_url
+      .replace(/{click_id}|{cid}/g, click_id)
+      .replace(/{payout}/g, payout || 0)
+      .replace(/{event}/g, event || '');
+
+    console.log("🚀 Final Postback URL:", finalUrl);
+
+    await axios.get(finalUrl, { timeout: 4000 });
+
+    console.log("✅ Publisher postback fired:", finalUrl);
+
+  } catch (e) {
+    console.error("❌ Publisher postback failed:", e.message);
+  }
+}
+
+
+//async function firePublisherPostback({ campaign_id, publisher_id, click_id, payout, event }) {
+  //try {
+    //const [rows] = await db.promise().query(
+      //`SELECT postback_url
+       //FROM publisher_links
+       //WHERE campaign_id = ? AND publisher_id = ?
+       //LIMIT 1`,
+      //[campaign_id, publisher_id]
+    //);
+
+    //if (!rows.length) return;
+
+    //let finalUrl = rows[0].postback_url
+      //.replace("{click_id}", click_id)
+      //.replace("{payout}", payout)
+      //.replace("{event}", event);
+
+    //await axios.get(finalUrl, { timeout: 4000 });
+
+    //console.log("✅ Publisher postback fired:", finalUrl);
+  //} catch (e) {
+    //console.error("❌ Publisher postback failed:", e.message);
+  //}
+//}
+
+
+
+
+
+
+
+
+
+
+exports.handlePostbacks = async (req, res) => {
+  try {
+    const { click_id, conversion_id, payout, event_goal } = req.query;
+
+    if (!click_id) {
       return res.status(400).json({ error: "clickid required" });
     }
 
     // 1️⃣ Find click
-    const [clickRows] = await db.query(
+    const [clickRows] = await db.promise().query(
       "SELECT * FROM clicks WHERE advertiser_click_id = ? LIMIT 1",
-      [clickid]
+      [click_id]
     );
 
     if (clickRows.length === 0) {
@@ -22,10 +253,10 @@ exports.handlePostback = async (req, res) => {
     const click = clickRows[0];
 
     // 2️⃣ Insert conversion
-    const [conversionResult] = await db.query(
+    const [conversionResult] = await db.promise().query(
       `INSERT INTO conversions
-       (campaign_id, click_id, advertiser_click_id, conversion_id, payout, publisher_id, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'approved', NOW())`,
+       (campaign_id, click_id, advertiser_click_id, conversion_id, payout, publisher_id, event_goal, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', NOW())`,
       [
         click.campaign_id,
         click.click_id,
@@ -33,6 +264,7 @@ exports.handlePostback = async (req, res) => {
         conversion_id || null,
         payout || 0,
         click.publisher_id,
+        event_goal
       ]
     );
 
@@ -40,15 +272,15 @@ exports.handlePostback = async (req, res) => {
     console.log("✅ Conversion saved:", conversionId);
 
     // 3️⃣ Insert wallet (SAFE)
-    try {
-      await db.query(
-        "INSERT INTO wallet (publisher_id, conversion_id, amount) VALUES (?, ?, ?)",
-        [click.publisher_id, conversionId, payout || 0]
-      );
-      console.log("✅ Wallet credited");
-    } catch (walletErr) {
-      console.error("❌ Wallet insert failed:", walletErr.sqlMessage);
-    }
+    //try {
+      //await db.promise().query(
+        //"INSERT INTO wallet (publisher_id, conversion_id, amount) VALUES (?, ?, ?)",
+        //[click.publisher_id, conversionId, payout || 0]
+      //);
+      //console.log("✅ Wallet credited");
+    //} catch (walletErr) {
+      //console.error("❌ Wallet insert failed:", walletErr.sqlMessage);
+    //}
 
     // 4️⃣ Fire publisher postback (ASYNC, non-blocking)
     firePublisherPostback({
@@ -69,11 +301,11 @@ exports.handlePostback = async (req, res) => {
 
 
 // 🔁 Publisher postback trigger
-async function firePublisherPostback({ campaign_id, publisher_id, click_id, payout }) {
+async function firePublisherPostbacks({ campaign_id, publisher_id, click_id, payout }) {
   try {
-    console.log("🔔 Checking publisher postback:", { campaign_id, publisher_id });
+    console.log("🔔 Checking publisher postback:", { campaign_id, publisher_id,click_id });
 
-    const [rows] = await db.query(
+    const [rows] = await db.promise().query(
       `SELECT postback_url
        FROM publisher_links
        WHERE campaign_id = ? AND publisher_id = ?
@@ -87,6 +319,7 @@ async function firePublisherPostback({ campaign_id, publisher_id, click_id, payo
     }
 
     const postbackUrl = rows[0].postback_url;
+console.log("Publisher postback URL:", postbackUrl);
 
     if (!postbackUrl) {
       console.log("ℹ️ Publisher postback URL not configured");
@@ -134,6 +367,8 @@ console.log("api hit",req.body);
           message: 'Database error'
         });
       }
+
+console.log("all and done",result);
 
       if (result.affectedRows === 0) {
         return res.status(404).json({

@@ -10,6 +10,9 @@ app.use("/link", require("./routes/linkRoutes"));
 app.use("/", require("./routes/clickRoutes"));
 app.use("/postback", require("./routes/postbackRoutes"));
 app.use("/publisher", require("./routes/publisherRoutes"));
+
+app.use("/", require("./routes/eventsRoutes"));
+
 // app.get("/click/test", (req, res) => {
 //     res.redirect("https://advertiser.com");
 //   });

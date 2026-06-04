@@ -1,6 +1,9 @@
 const db = require("../config/db");
 
 const crypto = require("crypto");
+const { buildRedirectURL } = require("../utils/trackingHandler");
+
+
 
 exports.trackClick = (req, res) => {
   const { publisher_handle} = req.params;
@@ -51,18 +54,45 @@ console.log("campaign_id",campaign_id,publisher_handle)
           const adv = advRows[0];
 
           // 3️⃣ Build redirect URL
-          let redirectURL = adv.advertiser_link;
+          // let redirectURL = adv.advertiser_link;
 
-          if (redirectURL.includes("{click_id}")) {
-            redirectURL = redirectURL.replace(
-              "{click_id}",
-              advertiserClickId
-            );
-          } else {
-            redirectURL +=
-              (redirectURL.includes("?") ? "&" : "?") +
-              `${adv.click_id_param}=${advertiserClickId}`;
-          }
+          // if (redirectURL.includes("{click_id}")) {
+          //   redirectURL = redirectURL.replace(
+          //     "{click_id}",
+          //     advertiserClickId
+          //   );
+          // } else {
+          //   redirectURL +=
+          //     (redirectURL.includes("?") ? "&" : "?") +
+          //     `${adv.click_id_param}=${advertiserClickId}`;
+          // }
+         // 🔥 STEP 1: Replace placeholders FIRST
+
+let advertiserLink = adv.advertiser_link;
+
+advertiserLink = advertiserLink
+  .replace(/{click_id}/g, advertiserClickId)
+  .replace(/{gaid}/g, gaid || "")
+  .replace(/{idfa}/g, idfa || "")
+  .replace(/{source}/g, source || "")
+  .replace(/{sub_pub}/g, subpub || "")
+  .replace(/{android_id}/g, gaid || "")
+  .replace(/{p4}/g, "")
+  .replace(/{af_ad_id}/g, "");
+
+  const redirectURL = buildRedirectURL({
+    advertiser_link: advertiserLink,   // ✅ use cleaned URL
+    advertiserClickId,
+    source,
+    adv
+  });
+  
+  console.log("FINAL REDIRECT:", redirectURL);
+// 🔥 DEBUG (IMPORTANT)
+console.log("AFTER REPLACEMENT:", advertiserLink);
+
+console.log("INPUT PARAMS:", { source, gaid, idfa });
+          console.log("FINAL REDIRECT:", redirectURL);
 
           // 4️⃣ Save click
           const insertSQL = `
@@ -278,3 +308,161 @@ console.log("campaign_id",campaign_id,publisher_handle)
 //     }
 //   );
 // };
+
+
+const HARDCODE_TOKEN = "PT-8b9dd46b05127cf794b61e70a0a3b7e4";
+
+const DB_TOKENS = [
+  "PT-fefb06837d1fe8c2d1b85136b15eb943",
+  "PT-5968d500411fb55eadb75f4206fb0128"
+];
+
+exports.getCampaignWithPublisherLinks = async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "token is required"
+      });
+    }
+
+    // ================================
+    // 🎯 CASE 1: HARDCODE TOKEN
+    // ================================
+    if (token === HARDCODE_TOKEN) {
+
+      const query = `
+        SELECT 
+          cd.id AS offer_id,
+          cd.campaign_name,
+          cd.geo,
+          cd.Vertical,
+          cd.state_city,
+          cd.preview_url,
+          cd.os,
+          cd.payable_event,
+          cd.kpi,
+          (cd.adv_payout * 0.7) AS payout,
+          pl.generated_link AS tracking_link
+        FROM campaign_data cd
+        INNER JOIN publisher_links pl 
+          ON cd.id = pl.campaign_id
+        WHERE pl.api_token = ?
+        AND cd.id = 2416
+        ORDER BY pl.id DESC
+        LIMIT 1
+      `;
+
+      const [rows] = await db.promise().query(query, [token]);
+
+      if (!rows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "No data found"
+        });
+      }
+
+      const finalData = rows.map(row => ({
+        ...row,
+        offer_id: 2416,
+        offer_type: "CPA",
+        click_cap: 50000,
+        install_cap: 100,
+        package: "id6460300848"
+      }));
+
+      return res.status(200).json({
+        success: true,
+        count: finalData.length,
+        data: finalData
+      });
+    }
+
+    // ================================
+    // 🎯 CASE 2: DB ONLY TOKENS
+    // ================================
+    if (DB_TOKENS.includes(token)) {
+
+      // const query = `
+      //   SELECT 
+      //     cd.id AS offer_id,
+      //     cd.campaign_name,
+      //     cd.geo,
+      //     cd.Vertical,
+      //     cd.state_city,
+      //     cd.preview_url,
+      //     cd.os,
+      //     cd.payable_event,
+      //     cd.kpi,
+      //     cd.adv_payout AS payout,
+      //     pl.generated_link AS tracking_link
+      //   FROM campaign_data cd
+      //   INNER JOIN publisher_links pl 
+      //     ON cd.id = pl.campaign_id
+      //   WHERE pl.api_token = ?
+      //   ORDER BY pl.id DESC
+      // `;
+      const query = `
+  SELECT 
+    cd.id AS offer_id,
+    cd.campaign_name,
+    cd.geo,
+    cd.Vertical,
+    cd.state_city,
+    cd.preview_url,
+    cd.os,
+    cd.payable_event,
+    cd.kpi,
+    (cd.adv_payout * 0.7) AS payout,
+    pl.generated_link AS tracking_link
+  FROM campaign_data cd
+  INNER JOIN publisher_links pl 
+    ON cd.id = pl.campaign_id
+
+  INNER JOIN (
+    SELECT campaign_id, MAX(id) as max_id
+    FROM publisher_links
+    WHERE api_token = ?
+    GROUP BY campaign_id
+  ) latest 
+    ON pl.id = latest.max_id
+
+  WHERE pl.api_token = ?
+  ORDER BY pl.id DESC
+`;
+const [rows] = await db.promise().query(query, [token, token]);
+
+      // const [rows] = await db.promise().query(query, [token]);
+
+      if (!rows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "No data found for this token"
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        count: rows.length,
+        data: rows   // ✅ NO HARDCODE
+      });
+    }
+
+    // ================================
+    // ❌ INVALID TOKEN
+    // ================================
+    return res.status(403).json({
+      success: false,
+      message: "Unauthorized token"
+    });
+
+  } catch (error) {
+    console.error("Error fetching campaign data:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error"
+    });
+  }
+};

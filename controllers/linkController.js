@@ -661,7 +661,7 @@ const POSTBACK_BASE = "https://track.pidmetric.com/postback";
 // change to your actual domain later
 // Generate unique advertiser key
 function generateAdvertiserKey() {
-  return "ADV-" + crypto.randomBytes(4).toString("hex");
+  return "ADV" + crypto.randomBytes(4).toString("hex");
 }
 
 exports.saveAdvertiserLink = (req, res) => {

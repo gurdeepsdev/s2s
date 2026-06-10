@@ -467,12 +467,21 @@ exports.handlePostback = async (req, res) => {
     }
 
    // 🔹 Sanitize payout (OPTIONAL FIELD)
-    const numericPayout = parseFloat(payout);
-    let finalPayout = null;
+   const numericPayout = parseFloat(payout);
 
-    if (!isNaN(numericPayout)) {
-      finalPayout = numericPayout;
-    }
+   let finalPayout = payout || "0";
+
+   if (
+       payout === undefined ||
+       payout === null ||
+       payout === "" ||
+       payout === "{payout}"
+   ) {
+       finalPayout = "0";
+   }
+
+console.log("RAW PAYOUT:", payout);
+console.log("FINAL PAYOUT:", finalPayout);
 
 
     // 1️⃣ Find click
@@ -530,7 +539,7 @@ exports.handlePostback = async (req, res) => {
         click.click_id,
         click.advertiser_click_id,
         conversion_id || null,
-        finalPayout,
+      finalPayout || 0,
         click.publisher_id,
         event_goal || null,
         event || null,
@@ -667,32 +676,6 @@ console.log(rows,"new",campaign_id,publisher_id)
     console.error("❌ Publisher postback failed:", e.message);
   }
 }
-
-
-//async function firePublisherPostback({ campaign_id, publisher_id, click_id, payout, event }) {
-  //try {
-    //const [rows] = await db.promise().query(
-      //`SELECT postback_url
-       //FROM publisher_links
-       //WHERE campaign_id = ? AND publisher_id = ?
-       //LIMIT 1`,
-      //[campaign_id, publisher_id]
-    //);
-
-    //if (!rows.length) return;
-
-    //let finalUrl = rows[0].postback_url
-      //.replace("{click_id}", click_id)
-      //.replace("{payout}", payout)
-      //.replace("{event}", event);
-
-    //await axios.get(finalUrl, { timeout: 4000 });
-
-    //console.log("✅ Publisher postback fired:", finalUrl);
-  //} catch (e) {
-    //console.error("❌ Publisher postback failed:", e.message);
-  //}
-//}
 
 
 

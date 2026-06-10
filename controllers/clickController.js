@@ -7,7 +7,7 @@ const { buildRedirectURL } = require("../utils/trackingHandler");
 
 exports.trackClick = (req, res) => {
   const { publisher_handle} = req.params;
-  const { cid, pub_id, subpub, gaid, idfa, source, campaign_id } = req.query;
+  const { cid, pub_id, subpub, gaid, idfa, source, campaign_id,p1,p2,p3,p4,p5 } = req.query;
 console.log("campaign_id",campaign_id,publisher_handle)
   if (!campaign_id) {
     return res.status(400).send("Missing campaign_id");
@@ -98,8 +98,8 @@ console.log("INPUT PARAMS:", { source, gaid, idfa });
           const insertSQL = `
             INSERT INTO clicks
             (click_id, publisher_id, campaign_id, advertiser_click_id,
-             pub_id, sub_pub_id, gaid, idfa, ip_address, user_agent, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+             pub_id, sub_pub_id, gaid, idfa, ip_address, user_agent, source,p1,p2,p3,p4,p5, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?, NOW())
           `;
 
           db.query(
@@ -115,7 +115,12 @@ console.log("INPUT PARAMS:", { source, gaid, idfa });
               idfa || null,
               ip_address,
               user_agent,
-              source || null
+              source || null,
+              p1 || null,
+              p2 || null,
+              p3 || null,
+              p4 || null,
+              p5 || null
             ],
             (err3) => {
               if (err3) {

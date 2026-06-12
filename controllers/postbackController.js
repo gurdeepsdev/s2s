@@ -483,16 +483,24 @@ exports.handlePostback = async (req, res) => {
 console.log("RAW PAYOUT:", payout);
 console.log("FINAL PAYOUT:", finalPayout);
 
+console.log("POSTBACK CLICK ID:", click_id);
 
     // 1️⃣ Find click
     const [clickRows] = await db.promise().query(
       "SELECT * FROM clicks WHERE advertiser_click_id = ? LIMIT 1",
       [click_id]
     );
+    console.log("CLICK MATCH COUNT:", clickRows.length);
+
 
     if (clickRows.length === 0) {
       return res.status(400).json({ error: "Click not found" });
     }
+    console.log("✅ CLICK FOUND:", {
+      campaign_id: clickRows[0].campaign_id,
+      advertiser_click_id: clickRows[0].advertiser_click_id,
+      click_id: clickRows[0].click_id
+    });
 
     const click = clickRows[0];
 

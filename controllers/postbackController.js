@@ -454,7 +454,10 @@ exports.handlePostback = async (req, res) => {
     console.log("🧠 User Agent:", userAgent);
 
    // const { click_id, conversion_id, payout, event_goal, event, p1,p2,p3,p4,p5  } = req.query;
-
+   console.log(
+    "FULL POSTBACK QUERY:",
+    JSON.stringify(req.query, null, 2)
+);
     // const { click_id, conversion_id, payout, event_goal, event,p1,p2,p3,p4,p5 } = req.query;
     let { click_id, conversion_id, payout, event_goal, event,p1,p2,p3,p4,p5 } = req.query;
 

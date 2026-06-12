@@ -79,6 +79,7 @@ advertiserLink = advertiserLink
   .replace(/{android_id}/g, gaid || "")
   .replace(/{p4}/g, "")
   .replace(/{af_ad_id}/g, "");
+  console.log("ADVERTISER CLICK ID:", advertiserClickId);
 
   const redirectURL = buildRedirectURL({
     advertiser_link: advertiserLink,   // ✅ use cleaned URL
@@ -86,7 +87,6 @@ advertiserLink = advertiserLink
     source,
     adv
   });
-  
   console.log("FINAL REDIRECT:", redirectURL);
 // 🔥 DEBUG (IMPORTANT)
 console.log("AFTER REPLACEMENT:", advertiserLink);

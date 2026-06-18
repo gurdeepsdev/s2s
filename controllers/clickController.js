@@ -70,6 +70,16 @@ console.log("campaign_id",campaign_id,publisher_handle)
 
 let advertiserLink = adv.advertiser_link;
 
+// advertiserLink = advertiserLink
+//   .replace(/{click_id}/g, advertiserClickId)
+//   .replace(/{gaid}/g, gaid || "")
+//   .replace(/{idfa}/g, idfa || "")
+//   .replace(/{source}/g, source || "")
+//   .replace(/{sub_pub}/g, subpub || "")
+//   .replace(/{android_id}/g, gaid || "")
+//   .replace(/{p4}/g, "")
+//   .replace(/{af_ad_id}/g, "");
+
 advertiserLink = advertiserLink
   .replace(/{click_id}/g, advertiserClickId)
   .replace(/{gaid}/g, gaid || "")
@@ -77,9 +87,16 @@ advertiserLink = advertiserLink
   .replace(/{source}/g, source || "")
   .replace(/{sub_pub}/g, subpub || "")
   .replace(/{android_id}/g, gaid || "")
-  .replace(/{p4}/g, "")
+  .replace(/{p1}/g, p1 || "")
+  .replace(/{p2}/g, p2 || "")
+  .replace(/{p3}/g, p3 || "")
+  .replace(/{p4}/g, p4 || "")
+  .replace(/{p5}/g, p5 || "")
   .replace(/{af_ad_id}/g, "");
+  
   console.log("ADVERTISER CLICK ID:", advertiserClickId);
+  console.log("ORIGINAL ADVERTISER URL:", adv.advertiser_link);
+console.log("AFTER REPLACEMENT:", advertiserLink);
 
   const redirectURL = buildRedirectURL({
     advertiser_link: advertiserLink,   // ✅ use cleaned URL

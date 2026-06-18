@@ -27,6 +27,11 @@ exports.trackImpression = (req, res) => {
   const gaid        = req.query.gaid        || body.gaid        || null;
   const idfa        = req.query.idfa        || body.idfa        || null;
   const source      = req.query.source      || body.source      || null;
+  const p1          = req.query.p1          || body.p1          || null;
+  const p2          = req.query.p2          || body.p2          || null;
+  const p3          = req.query.p3          || body.p3          || null;
+  const p4          = req.query.p4          || body.p4          || null;
+  const p5          = req.query.p5          || body.p5          || null;
 
   // imp_id: publisher-supplied or auto-generated (mirrors cid in clicks)
   const imp_id =
@@ -78,23 +83,38 @@ exports.trackImpression = (req, res) => {
 
           const adv = (advRows && advRows.length > 0) ? advRows[0] : {};
           const advertiserImpressionUrl = adv.advertiser_impression_url || null;
-
+          console.log("advertiserImpressionUrl:", advertiserImpressionUrl);
           // ── Step 3: Build the forwarding URL (same macro logic as clicks) ─
           let forwardUrl = null;
 
           if (advertiserImpressionUrl) {
             // Replace all standard macros — same set as click controller
+            // let cleaned = advertiserImpressionUrl
+            //   .replace(/{imp_id}/g,       advertiserImpId)
+            //   .replace(/{click_id}/g,     advertiserImpId)  // some networks reuse {click_id}
+            //   .replace(/{gaid}/g,         gaid    || "")
+            //   .replace(/{idfa}/g,         idfa    || "")
+            //   .replace(/{source}/g,       source  || "")
+            //   .replace(/{sub_pub}/g,      subpub  || "")
+            //   .replace(/{android_id}/g,   gaid    || "")
+            //   .replace(/{publisher_id}/g, publisher_id || "")
+            //   .replace(/{af_ad_id}/g,     "")
+            //   .replace(/{p4}/g,           "");
             let cleaned = advertiserImpressionUrl
-              .replace(/{imp_id}/g,       advertiserImpId)
-              .replace(/{click_id}/g,     advertiserImpId)  // some networks reuse {click_id}
-              .replace(/{gaid}/g,         gaid    || "")
-              .replace(/{idfa}/g,         idfa    || "")
-              .replace(/{source}/g,       source  || "")
-              .replace(/{sub_pub}/g,      subpub  || "")
-              .replace(/{android_id}/g,   gaid    || "")
-              .replace(/{publisher_id}/g, publisher_id || "")
-              .replace(/{af_ad_id}/g,     "")
-              .replace(/{p4}/g,           "");
+  .replace(/{imp_id}/g, advertiserImpId)
+  .replace(/{click_id}/g, advertiserImpId)
+  .replace(/{gaid}/g, gaid || "")
+  .replace(/{idfa}/g, idfa || "")
+  .replace(/{source}/g, source || "")
+  .replace(/{sub_pub}/g, subpub || "")
+  .replace(/{android_id}/g, gaid || "")
+  .replace(/{publisher_id}/g, publisher_id || "")
+  .replace(/{p1}/g, p1 || "")
+  .replace(/{p2}/g, p2 || "")
+  .replace(/{p3}/g, p3 || "")
+  .replace(/{p4}/g, p4 || "")
+  .replace(/{p5}/g, p5 || "")
+  .replace(/{af_ad_id}/g, "");
 
             // Run through the same buildRedirectURL handler used for clicks
             // (handles AppsFlyer, PlayStore, Branch, generic web)
@@ -106,6 +126,11 @@ exports.trackImpression = (req, res) => {
             });
 
             console.log("🔗 Advertiser impression URL built:", forwardUrl);
+            console.log("ABOUT TO FIRE:", forwardUrl);
+            console.log("IMPRESSION URL FROM DB:", advertiserImpressionUrl);
+console.log("CLEANED IMPRESSION URL:", cleaned);
+console.log("FINAL FORWARD URL:", forwardUrl);
+
           }
 
           // ── Step 4: Store impression (same schema as clicks) ─────────────
@@ -113,8 +138,8 @@ exports.trackImpression = (req, res) => {
             INSERT INTO impressions
             (imp_id, advertiser_imp_id, publisher_id, campaign_id,
              pub_id, sub_pub_id, gaid, idfa,
-             ip_address, user_agent, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+             ip_address, user_agent, source,p1,p2,p3,p4,p5, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?, NOW())
           `;
 
           db.query(
@@ -130,7 +155,12 @@ exports.trackImpression = (req, res) => {
               idfa    || null,
               ip_address,
               user_agent,
-              source  || null
+              source  || null,
+              p1      || null,
+              p2      || null,
+              p3      || null,
+              p4      || null,
+              p5      || null
             ],
             (err3) => {
               if (err3) {
@@ -166,8 +196,14 @@ exports.trackImpression = (req, res) => {
 // ─────────────────────────────────────────────────────────────
 async function fireAdvertiserImpression(url) {
   try {
-    await axios.get(url, { timeout: 5000 });
-    console.log("✅ Advertiser impression fired:", url);
+    const response = await axios.get(url, {
+      timeout: 5000,
+      validateStatus: () => true
+    });
+    
+    console.log("STATUS:", response.status);
+    console.log("URL:", url);
+    console.log("DATA:", response.data);
   } catch (e) {
     console.error("❌ Advertiser impression fire failed:", e.message);
   }

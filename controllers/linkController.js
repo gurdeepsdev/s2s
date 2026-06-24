@@ -853,6 +853,22 @@ function generatePublisherApiUrl(publisher_id) {
   });
 }
 
+exports.getPublisherApiUrl = async (req, res) => {
+  const { publisher_id } = req.query;
+
+  if (!publisher_id) {
+    return res.status(400).json({ success: false, message: "publisher_id is required" });
+  }
+
+  try {
+    const apiUrl = await generatePublisherApiUrl(publisher_id);
+    return res.json({ success: true, publisher_id, api_url: apiUrl });
+  } catch (err) {
+    console.error("getPublisherApiUrl error:", err);
+    return res.status(500).json({ success: false, message: "Failed to generate API URL" });
+  }
+};
+
 exports.generatePublisherLink = (req, res) => {
   const { campaign_id, publisher_id, hide_referrer } = req.body;
 
@@ -872,7 +888,7 @@ exports.generatePublisherLink = (req, res) => {
   `;
 
   db.query(fetchSQL, [publisher_id], (err, rows) => {
-    if (err) return res.status(500).json({ success:false, error: err });
+    if (err) return res.status(500).json({ success: false, error: err });
 
     const publisherHandle =
       rows.length > 0
@@ -883,6 +899,7 @@ exports.generatePublisherLink = (req, res) => {
       rows.length > 0
         ? rows[0].postback_url
         : null;
+
     // 2️⃣ Build tracking link
     const generatedLink =
       `https://track.pidmetric.com/click/${publisherHandle}` +
@@ -903,74 +920,104 @@ exports.generatePublisherLink = (req, res) => {
       `&sub_pub={sub_pub}` +
       `&source={source}`;
 
-    // 3️⃣ Insert new campaign row WITH SAME postback_url
-    const insertSQL = `
-      INSERT INTO publisher_links
-      (
-        campaign_id,
-        publisher_id,
-        publisher_handle,
-        generated_link,
-        impression_link,
-        postback_url,
-        hide_referrer
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `;
+    // 3️⃣ Generate API URL first so it can be stored in the INSERT
+    generatePublisherApiUrl(publisher_id)
+      .then((publisherApiUrl) => {
 
-    db.query(
-      insertSQL,
-      [
-        campaign_id,
-        publisher_id,
-        publisherHandle,
-        generatedLink,
-        impressionLink,
-        postbackUrl,
-        hide_referrer ? 1 : 0
-      ],
-      (err2) => {
-        if (err2) return res.status(500).json({ success:false, error: err2 });
+        const insertSQL = `
+          INSERT INTO publisher_links
+          (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, publisher_offer_api)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?)
+        `;
 
-         // ✅ CREATE PUBLISHER API URL HERE
-        //  const publisherApiUrl = generatePublisherApiUrl(publisher_id);
-         generatePublisherApiUrl(publisher_id)
-         .then((publisherApiUrl) => {
-       
-           return res.json({
-             success: true,
-             message: rows.length > 0
-               ? "New campaign link created using existing publisher postback"
-               : "Publisher created & first campaign link added",
-       
-             publisher_handle: publisherHandle,
-             postback_url: postbackUrl,
-             publisher_link: generatedLink,
-             impression_link: impressionLink,
-       
-             // ✅ Correct value
-             publisher_offer_api: publisherApiUrl
-           });
-       
-         })
-         .catch((err3) => {
-           return res.status(500).json({ success:false, error: err3 });
-         });
-        // return res.json({
-        //   success: true,
-        //   message: rows.length > 0
-        //     ? "New campaign link created using existing publisher postback"
-        //     : "Publisher created & first campaign link added",
-        //   publisher_handle: publisherHandle,
-        //   postback_url: postbackUrl,
-        //   publisher_link: generatedLink,
+        db.query(
+          insertSQL,
+          [
+            campaign_id,
+            publisher_id,
+            publisherHandle,
+            generatedLink,
+            impressionLink,
+            postbackUrl,
+            hide_referrer ? 1 : 0,
+            publisherApiUrl
+          ],
+          (err2) => {
+            if (err2) return res.status(500).json({ success: false, error: err2 });
 
-        //   // ✅ SHOW THIS TO USER
-        //   publisher_offer_api: publisherApiUrl
-        // });
-      }
-    );
+            return res.json({
+              success: true,
+              message: rows.length > 0
+                ? "New campaign link created using existing publisher postback"
+                : "Publisher created & first campaign link added",
+              publisher_handle: publisherHandle,
+              postback_url: postbackUrl,
+              publisher_link: generatedLink,
+              impression_link: impressionLink,
+              publisher_offer_api: publisherApiUrl
+            });
+          }
+        );
+
+      })
+      .catch((err3) => {
+        return res.status(500).json({ success: false, error: err3 });
+      });
   });
+};
+
+exports.disapprovePublisher = (req, res) => {
+  const { campaign_id, publisher_id } = req.body;
+
+  if (!campaign_id || !publisher_id) {
+    return res.status(400).json({
+      success: false,
+      message: "campaign_id and publisher_id required"
+    });
+  }
+
+  db.query(
+    `UPDATE publisher_links SET status = 'disapproved'
+     WHERE campaign_id = ? AND publisher_id = ?`,
+    [campaign_id, publisher_id],
+    (err, result) => {
+      if (err) return res.status(500).json({ success: false, error: err });
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "No publisher link found for this campaign and publisher"
+        });
+      }
+
+      return res.json({ success: true, message: "Publisher disapproved successfully" });
+    }
+  );
+};
+
+exports.getPublisherLinks = (req, res) => {
+  const { campaign_id } = req.query;
+
+  if (!campaign_id) {
+    return res.status(400).json({ success: false, message: "campaign_id required" });
+  }
+
+  db.query(
+    `SELECT publisher_id, generated_link, impression_link, publisher_offer_api, status
+     FROM publisher_links
+     WHERE campaign_id = ?
+     AND id IN (
+       SELECT MAX(id) FROM publisher_links
+       WHERE campaign_id = ?
+       GROUP BY publisher_id
+     )`,
+    [campaign_id, campaign_id],
+    (err, rows) => {
+      if (err) return res.status(500).json({ success: false, error: err });
+
+      return res.json({ success: true, data: rows });
+    }
+  );
 };
 
 async function getPublisherCampaigns(publisher_id) {

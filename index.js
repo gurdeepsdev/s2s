@@ -14,6 +14,7 @@ app.use("/postback", require("./routes/postbackRoutes"));
 app.use("/publisher", require("./routes/publisherRoutes"));
 
 app.use("/", require("./routes/eventsRoutes"));
+app.use("/caps", require("./routes/capRoutes"));
 
 // app.get("/click/test", (req, res) => {
 //     res.redirect("https://advertiser.com");

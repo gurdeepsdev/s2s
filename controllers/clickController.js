@@ -332,159 +332,88 @@ console.log("INPUT PARAMS:", { source, gaid, idfa });
 // };
 
 
-const HARDCODE_TOKEN = "PT-8b9dd46b05127cf794b61e70a0a3b7e4";
-
-const DB_TOKENS = [
-  "PT-fefb06837d1fe8c2d1b85136b15eb943",
-  "PT-5968d500411fb55eadb75f4206fb0128"
-];
-
 exports.getCampaignWithPublisherLinks = async (req, res) => {
   try {
     const { token } = req.query;
 
     if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: "token is required"
-      });
+      return res.status(400).json({ success: false, message: "token is required" });
     }
 
-    // ================================
-    // 🎯 CASE 1: HARDCODE TOKEN
-    // ================================
-    if (token === HARDCODE_TOKEN) {
+    const query = `
+      SELECT
+        cd.id            AS offer_id,
+        cd.campaign_name,
+        cd.geo,
+        cd.Vertical,
+        cd.state_city,
+        cd.preview_url,
+        cd.os,
+        cd.payable_event,
+        cd.kpi,
+        (cd.adv_payout * 0.7) AS payout,
+        pl.generated_link AS tracking_link,
+        pc.daily,
+        pc.monthly,
+        pc.lifetime,
+        pc.type              AS cap_type,
+        pc.publisher_cap_type
+      FROM campaign_data cd
 
-      const query = `
-        SELECT 
-          cd.id AS offer_id,
-          cd.campaign_name,
-          cd.geo,
-          cd.Vertical,
-          cd.state_city,
-          cd.preview_url,
-          cd.os,
-          cd.payable_event,
-          cd.kpi,
-          (cd.adv_payout * 0.7) AS payout,
-          pl.generated_link AS tracking_link
-        FROM campaign_data cd
-        INNER JOIN publisher_links pl 
-          ON cd.id = pl.campaign_id
-        WHERE pl.api_token = ?
-        AND cd.id = 2416
-        ORDER BY pl.id DESC
-        LIMIT 1
-      `;
+      INNER JOIN publisher_links pl
+        ON cd.id = pl.campaign_id
 
-      const [rows] = await db.promise().query(query, [token]);
+      INNER JOIN (
+        SELECT campaign_id, MAX(id) AS max_id
+        FROM publisher_links
+        WHERE api_token = ?
+          AND status = 'approved'
+        GROUP BY campaign_id
+      ) latest ON pl.id = latest.max_id
 
-      if (!rows.length) {
-        return res.status(404).json({
-          success: false,
-          message: "No data found"
-        });
+      LEFT JOIN (
+        SELECT campaign_id, daily, monthly, lifetime, type, publisher_cap_type
+        FROM publisher_caps
+        WHERE id IN (
+          SELECT MAX(id) FROM publisher_caps GROUP BY campaign_id
+        )
+      ) pc ON cd.id = pc.campaign_id
+
+      WHERE pl.api_token = ?
+        AND pl.status = 'approved'
+      ORDER BY pl.id DESC
+    `;
+
+    const [rows] = await db.promise().query(query, [token, token]);
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "No approved offers found for this token" });
+    }
+
+    const data = rows.map((row) => {
+      let package_id = null;
+
+      if (row.preview_url && row.preview_url !== "NA") {
+        const url = row.preview_url;
+
+        if (url.includes("apps.apple.com")) {
+          const iosMatch = url.match(/\/id(\d+)/);
+          if (iosMatch) package_id = iosMatch[1];
+        } else if (url.includes("play.google.com")) {
+          const androidMatch = url.match(/[?&]id=([^&]+)/);
+          if (androidMatch) package_id = androidMatch[1];
+        } else {
+          package_id = url.trim();
+        }
       }
 
-      const finalData = rows.map(row => ({
-        ...row,
-        offer_id: 2416,
-        offer_type: "CPA",
-        click_cap: 50000,
-        install_cap: 100,
-        package: "id6460300848"
-      }));
-
-      return res.status(200).json({
-        success: true,
-        count: finalData.length,
-        data: finalData
-      });
-    }
-
-    // ================================
-    // 🎯 CASE 2: DB ONLY TOKENS
-    // ================================
-    if (DB_TOKENS.includes(token)) {
-
-      // const query = `
-      //   SELECT 
-      //     cd.id AS offer_id,
-      //     cd.campaign_name,
-      //     cd.geo,
-      //     cd.Vertical,
-      //     cd.state_city,
-      //     cd.preview_url,
-      //     cd.os,
-      //     cd.payable_event,
-      //     cd.kpi,
-      //     cd.adv_payout AS payout,
-      //     pl.generated_link AS tracking_link
-      //   FROM campaign_data cd
-      //   INNER JOIN publisher_links pl 
-      //     ON cd.id = pl.campaign_id
-      //   WHERE pl.api_token = ?
-      //   ORDER BY pl.id DESC
-      // `;
-      const query = `
-  SELECT 
-    cd.id AS offer_id,
-    cd.campaign_name,
-    cd.geo,
-    cd.Vertical,
-    cd.state_city,
-    cd.preview_url,
-    cd.os,
-    cd.payable_event,
-    cd.kpi,
-    (cd.adv_payout * 0.7) AS payout,
-    pl.generated_link AS tracking_link
-  FROM campaign_data cd
-  INNER JOIN publisher_links pl 
-    ON cd.id = pl.campaign_id
-
-  INNER JOIN (
-    SELECT campaign_id, MAX(id) as max_id
-    FROM publisher_links
-    WHERE api_token = ?
-    GROUP BY campaign_id
-  ) latest 
-    ON pl.id = latest.max_id
-
-  WHERE pl.api_token = ?
-  ORDER BY pl.id DESC
-`;
-const [rows] = await db.promise().query(query, [token, token]);
-
-      // const [rows] = await db.promise().query(query, [token]);
-
-      if (!rows.length) {
-        return res.status(404).json({
-          success: false,
-          message: "No data found for this token"
-        });
-      }
-
-      return res.status(200).json({
-        success: true,
-        count: rows.length,
-        data: rows   // ✅ NO HARDCODE
-      });
-    }
-
-    // ================================
-    // ❌ INVALID TOKEN
-    // ================================
-    return res.status(403).json({
-      success: false,
-      message: "Unauthorized token"
+      return { ...row, package_id };
     });
+
+    return res.status(200).json({ success: true, count: data.length, data });
 
   } catch (error) {
     console.error("Error fetching campaign data:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
+    return res.status(500).json({ success: false, message: "Internal server error" });
   }
 };

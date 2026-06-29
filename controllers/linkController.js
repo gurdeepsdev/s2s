@@ -879,97 +879,132 @@ exports.generatePublisherLink = (req, res) => {
     });
   }
 
-  // 1️⃣ Fetch publisher-level data (handle + postback + existing token)
-  const fetchSQL = `
-    SELECT publisher_handle, postback_url, api_token, api_url
-    FROM publisher_links
-    WHERE publisher_id = ?
-    AND api_token IS NOT NULL
-    LIMIT 1
-  `;
+  // 1️⃣ Check if a row already exists for this publisher + campaign
+  db.query(
+    `SELECT id, publisher_handle, postback_url, generated_link, impression_link, status
+     FROM publisher_links
+     WHERE publisher_id = ? AND campaign_id = ?
+     LIMIT 1`,
+    [publisher_id, campaign_id],
+    (err, existingRows) => {
+      if (err) return res.status(500).json({ success: false, error: err });
 
-  db.query(fetchSQL, [publisher_id], (err, rows) => {
-    if (err) return res.status(500).json({ success: false, error: err });
+      // Row exists → just approve it, return existing links
+      if (existingRows.length > 0) {
+        const existing = existingRows[0];
 
-    const tokenRow = rows[0] || null;
+        db.query(
+          `UPDATE publisher_links
+           SET status = 'approved', updated_at = NOW(), user_id = ?
+           WHERE publisher_id = ? AND campaign_id = ?`,
+          [user_id || null, publisher_id, campaign_id],
+          (errUpd) => {
+            if (errUpd) return res.status(500).json({ success: false, error: errUpd });
 
-    const fetchHandleSQL = `
-      SELECT publisher_handle, postback_url
-      FROM publisher_links
-      WHERE publisher_id = ?
-      LIMIT 1
-    `;
+            return res.json({
+              success: true,
+              message: "Publisher approved successfully",
+              publisher_handle: existing.publisher_handle,
+              postback_url: existing.postback_url,
+              publisher_link: existing.generated_link,
+              impression_link: existing.impression_link
+            });
+          }
+        );
+        return;
+      }
 
-    db.query(fetchHandleSQL, [publisher_id], (err1, handleRows) => {
-      if (err1) return res.status(500).json({ success: false, error: err1 });
-
-      const publisherHandle =
-        handleRows.length > 0
-          ? handleRows[0].publisher_handle
-          : generatePublisherHandle();
-
-      const postbackUrl =
-        handleRows.length > 0
-          ? handleRows[0].postback_url
-          : null;
-
-      const existingToken  = tokenRow ? tokenRow.api_token : null;
-      const existingApiUrl = tokenRow ? tokenRow.api_url   : null;
-
-      // 2️⃣ Build tracking link
-      const generatedLink =
-        `https://track.pidmetric.com/click/${publisherHandle}` +
-        `?campaign_id=${campaign_id}` +
-        `&pub_id=${publisher_id}` +
-        `&gaid={gaid}` +
-        `&cid={click_id}` +
-        `&sub_pub={sub_pub}` +
-        `&source={source}`;
-
-      // 2b️⃣ Build impression tracking link (parallel pipeline, same params)
-      const impressionLink =
-        `https://track.pidmetric.com/impression/${publisherHandle}` +
-        `?campaign_id=${campaign_id}` +
-        `&pub_id=${publisher_id}` +
-        `&gaid={gaid}` +
-        `&imp_id={imp_id}` +
-        `&sub_pub={sub_pub}` +
-        `&source={source}`;
-
-      // 3️⃣ Insert new campaign row
+      // No row → generate fresh links and insert
+      // 2️⃣ Fetch existing token + handle from other rows of this publisher
       db.query(
-        `INSERT INTO publisher_links
-         (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
-        [
-          campaign_id,
-          publisher_id,
-          publisherHandle,
-          generatedLink,
-          impressionLink,
-          postbackUrl,
-          hide_referrer ? 1 : 0,
-          existingToken,
-          existingApiUrl,
-          user_id || null
-        ],
-        (err2) => {
-          if (err2) return res.status(500).json({ success: false, error: err2 });
+        `SELECT publisher_handle, postback_url, api_token, api_url
+         FROM publisher_links
+         WHERE publisher_id = ?
+         AND api_token IS NOT NULL
+         LIMIT 1`,
+        [publisher_id],
+        (err1, tokenRows) => {
+          if (err1) return res.status(500).json({ success: false, error: err1 });
 
-          return res.json({
-            success: true,
-            message: handleRows.length > 0
-              ? "New campaign link created using existing publisher postback"
-              : "Publisher created & first campaign link added",
-            publisher_handle: publisherHandle,
-            postback_url: postbackUrl,
-            publisher_link: generatedLink,
-            impression_link: impressionLink
-          });
+          const tokenRow = tokenRows[0] || null;
+
+          db.query(
+            `SELECT publisher_handle, postback_url
+             FROM publisher_links
+             WHERE publisher_id = ?
+             LIMIT 1`,
+            [publisher_id],
+            (err2, handleRows) => {
+              if (err2) return res.status(500).json({ success: false, error: err2 });
+
+              const publisherHandle =
+                handleRows.length > 0
+                  ? handleRows[0].publisher_handle
+                  : generatePublisherHandle();
+
+              const postbackUrl =
+                handleRows.length > 0
+                  ? handleRows[0].postback_url
+                  : null;
+
+              const existingToken  = tokenRow ? tokenRow.api_token : null;
+              const existingApiUrl = tokenRow ? tokenRow.api_url   : null;
+
+              // 3️⃣ Build tracking links
+              const generatedLink =
+                `https://track.pidmetric.com/click/${publisherHandle}` +
+                `?campaign_id=${campaign_id}` +
+                `&pub_id=${publisher_id}` +
+                `&gaid={gaid}` +
+                `&cid={click_id}` +
+                `&sub_pub={sub_pub}` +
+                `&source={source}`;
+
+              const impressionLink =
+                `https://track.pidmetric.com/impression/${publisherHandle}` +
+                `?campaign_id=${campaign_id}` +
+                `&pub_id=${publisher_id}` +
+                `&gaid={gaid}` +
+                `&imp_id={imp_id}` +
+                `&sub_pub={sub_pub}` +
+                `&source={source}`;
+
+              // 4️⃣ Insert new row
+              db.query(
+                `INSERT INTO publisher_links
+                 (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
+                [
+                  campaign_id,
+                  publisher_id,
+                  publisherHandle,
+                  generatedLink,
+                  impressionLink,
+                  postbackUrl,
+                  hide_referrer ? 1 : 0,
+                  existingToken,
+                  existingApiUrl,
+                  user_id || null
+                ],
+                (err3) => {
+                  if (err3) return res.status(500).json({ success: false, error: err3 });
+
+                  return res.json({
+                    success: true,
+                    message: "Publisher link generated successfully",
+                    publisher_handle: publisherHandle,
+                    postback_url: postbackUrl,
+                    publisher_link: generatedLink,
+                    impression_link: impressionLink
+                  });
+                }
+              );
+            }
+          );
         }
       );
-    });
-  });
+    }
+  );
 };
 
 exports.disapprovePublisher = (req, res) => {

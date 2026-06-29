@@ -30,16 +30,72 @@ console.log("campaign_id",campaign_id,publisher_handle)
      FROM publisher_links
      WHERE publisher_handle = ?
        AND campaign_id = ?
+       AND status = 'approved'
      LIMIT 1`,
     [publisher_handle, campaign_id],
     (err, pubRows) => {
       if (err || pubRows.length === 0) {
-        return res.status(404).send("Invalid tracking link or campaign");
+        return res.status(403).send("Tracking link is inactive");
       }
 
       const { campaign_id, publisher_id, hide_referrer } = pubRows[0];
 
-      // 2️⃣ Find advertiser link
+      // 2️⃣ Check caps for this campaign
+      db.query(
+        `SELECT daily, monthly, lifetime
+         FROM publisher_caps
+         WHERE campaign_id = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [campaign_id],
+        (errCap, capRows) => {
+          if (errCap) {
+            console.error("Cap lookup error:", errCap);
+            return res.status(500).send("Cap check failed");
+          }
+
+          const cap = capRows.length > 0 ? capRows[0] : null;
+
+          // If no caps set, skip counting and proceed
+          if (!cap || (cap.daily === null && cap.monthly === null && cap.lifetime === null)) {
+            return proceedToAdvertiser();
+          }
+
+          // Count clicks: daily, monthly, lifetime in one query
+          db.query(
+            `SELECT
+               SUM(CASE WHEN DATE(created_at) = CURDATE() THEN 1 ELSE 0 END) AS daily_count,
+               SUM(CASE WHEN YEAR(created_at) = YEAR(NOW()) AND MONTH(created_at) = MONTH(NOW()) THEN 1 ELSE 0 END) AS monthly_count,
+               COUNT(*) AS lifetime_count
+             FROM clicks
+             WHERE campaign_id = ? AND publisher_id = ?`,
+            [campaign_id, publisher_id],
+            (errCount, countRows) => {
+              if (errCount) {
+                console.error("Click count error:", errCount);
+                return res.status(500).send("Cap count failed");
+              }
+
+              const { daily_count, monthly_count, lifetime_count } = countRows[0];
+
+              if (cap.daily !== null && daily_count >= cap.daily) {
+                return res.status(429).send("Daily click cap reached");
+              }
+              if (cap.monthly !== null && monthly_count >= cap.monthly) {
+                return res.status(429).send("Monthly click cap reached");
+              }
+              if (cap.lifetime !== null && lifetime_count >= cap.lifetime) {
+                return res.status(429).send("Lifetime click cap reached");
+              }
+
+              return proceedToAdvertiser();
+            }
+          );
+        }
+      );
+
+      function proceedToAdvertiser() {
+      // 3️⃣ Find advertiser link
       db.query(
         `SELECT advertiser_link, click_id_param
          FROM advertiser_links
@@ -176,7 +232,7 @@ console.log("INPUT PARAMS:", { source, gaid, idfa });
         }
       );
     }
-  );
+  }); // close publisher_links callback
 };
 
 

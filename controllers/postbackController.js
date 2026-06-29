@@ -567,39 +567,7 @@ console.log("POSTBACK CLICK ID:", click_id);
     console.log('✅ Conversion saved:', conversionId,
       '| attribution:', vtaImpression ? 'view_through' : 'click_through');
 
-    /**
-     * From here onward use ONLY `event`
-     * event_goal remains untouched for old logic & reports
-     */
-
-    // 3️⃣ Count today's conversions (NEW event-based logic)
-    const [[{ total }]] = await db.promise().query(
-      `SELECT COUNT(*) AS total
-       FROM conversions
-       WHERE campaign_id = ?
-       AND event = ?
-       AND DATE(created_at) = CURDATE()`,
-      [click.campaign_id, event]
-    );
-
-    console.log("📊 Total conversions today (event):", total);
- 
-
-
-    // 4️⃣ First 2 conversions always fire
-    if (total <= 10) {
-      firePublisherPostback({
-        campaign_id: click.campaign_id,
-        publisher_id: click.publisher_id,
-        click_id: click.click_id,
-        payout: finalPayout ?? 0,   // send 0 if invalid
-        event
-      });
-
-      return res.json({ message: "Conversion saved & fired (initial pass)" });
-    }
-
-    // 5️⃣ pass_post_back check
+    // 4️⃣ pass_post_back check
     const [[passRule]] = await db.promise().query(
       `SELECT is_pass FROM pass_post_back
        WHERE campaign_id = ? AND event_name = ? LIMIT 1`,
@@ -611,35 +579,35 @@ console.log("POSTBACK CLICK ID:", click_id);
       return res.json({ message: "Conversion saved (event blocked)" });
     }
 
-    // 6️⃣ Sampling logic after 5 conversions
-    if (total >= 20) {
-      const [[samplingRule]] = await db.promise().query(
-        `SELECT sampling_percentage FROM sampling
-         WHERE campaign_id = ? AND event_name = ? LIMIT 1`,
-        [click.campaign_id, event]
-      );
+    // 5️⃣ Sampling check
+    // sampling_percentage = % to BLOCK, remainder goes forward
+    // e.g. sampling_percentage = 10 → 10% blocked, 90% fire
+    const [[samplingRule]] = await db.promise().query(
+      `SELECT sampling_percentage FROM sampling
+       WHERE campaign_id = ? AND event_name = ? LIMIT 1`,
+      [click.campaign_id, event]
+    );
 
-      const samplingPercentage = samplingRule?.sampling_percentage || 100;
-      const rand = Math.random() * 100;
+    const samplingPercentage = samplingRule?.sampling_percentage ?? 0;
+    const rand = Math.random() * 100;
 
-      if (rand <= samplingPercentage) {
-        firePublisherPostback({
-          campaign_id: click.campaign_id,
-          publisher_id: click.publisher_id,
-          click_id: click.click_id,
-          payout: finalPayout ?? 0,   // send 0 if invalid
-          event
-        });
+    console.log(`🎲 Sampling: ${samplingPercentage}% block rate | rand: ${rand.toFixed(2)}`);
 
-        return res.json({ message: "Conversion fired (sampling pass)" });
-      } else {
-        console.log("⛔ Dropped by sampling");
-        return res.json({ message: "Conversion saved (sampling dropped)" });
-      }
+    if (rand <= samplingPercentage) {
+      console.log("⛔ Dropped by sampling");
+      return res.json({ message: "Conversion saved (sampling blocked)" });
     }
 
-    // 7️⃣ Cooldown phase (3rd & 4th conversion)
-    return res.json({ message: "Conversion saved (cooldown phase)" });
+    // 6️⃣ Fire publisher postback
+    firePublisherPostback({
+      campaign_id: click.campaign_id,
+      publisher_id: click.publisher_id,
+      click_id: click.click_id,
+      payout: finalPayout ?? 0,
+      event
+    });
+
+    return res.json({ message: "Conversion saved & fired" });
 
   } catch (err) {
     console.error("❌ Postback handler error:", err);

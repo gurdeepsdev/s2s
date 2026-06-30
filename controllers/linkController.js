@@ -815,8 +815,8 @@ function generatePublisherApiUrl(publisher_id) {
     // 1️⃣ check if token already exists for this publisher
     const sql = `
       SELECT api_token
-      FROM publisher_links
-      WHERE publisher_id = ?
+      FROM publids
+      WHERE pub_id = ?
       AND api_token IS NOT NULL
       LIMIT 1
     `;
@@ -835,15 +835,19 @@ function generatePublisherApiUrl(publisher_id) {
 
       const apiUrl = `https://track.pidmetric.com/api/publisher/offers?token=${token}`;
 
-      // 3️⃣ ensure ALL rows of this publisher have same token + api_url
+      // 3️⃣ save token + api_url on the publisher's publids row
       const updateSQL = `
-        UPDATE publisher_links
-        SET api_token = ?, api_url = ?
-        WHERE publisher_id = ?
+        UPDATE publids
+        SET api_token = ?, api_url = ?, updated_at = NOW()
+        WHERE pub_id = ?
       `;
 
-      db.query(updateSQL, [token, apiUrl, publisher_id], (err2) => {
+      db.query(updateSQL, [token, apiUrl, publisher_id], (err2, result) => {
         if (err2) return reject(err2);
+
+        if (result.affectedRows === 0) {
+          return reject(new Error(`No publid found for publisher_id ${publisher_id}`));
+        }
 
         resolve(apiUrl);
       });
@@ -915,92 +919,98 @@ exports.generatePublisherLink = (req, res) => {
       }
 
       // No row → generate fresh links and insert
-      // 2️⃣ Fetch existing token + handle from other rows of this publisher
+      // 2️⃣ Read publisher-level data from publids (source of truth)
       db.query(
         `SELECT publisher_handle, postback_url, api_token, api_url
-         FROM publisher_links
-         WHERE publisher_id = ?
-         AND api_token IS NOT NULL
+         FROM publids
+         WHERE pub_id = ?
          LIMIT 1`,
         [publisher_id],
-        (err1, tokenRows) => {
+        (err1, publidRows) => {
           if (err1) return res.status(500).json({ success: false, error: err1 });
 
-          const tokenRow = tokenRows[0] || null;
+          if (publidRows.length === 0) {
+            return res.status(404).json({
+              success: false,
+              message: "Publisher not found in publids"
+            });
+          }
 
-          db.query(
-            `SELECT publisher_handle, postback_url
-             FROM publisher_links
-             WHERE publisher_id = ?
-             LIMIT 1`,
-            [publisher_id],
-            (err2, handleRows) => {
-              if (err2) return res.status(500).json({ success: false, error: err2 });
+          const publidRow = publidRows[0];
 
-              const publisherHandle =
-                handleRows.length > 0
-                  ? handleRows[0].publisher_handle
-                  : generatePublisherHandle();
+          let publisherHandle = publidRow.publisher_handle;
+          const postbackUrl   = publidRow.postback_url || null;
+          const existingToken = publidRow.api_token     || null;
+          const existingApiUrl = publidRow.api_url      || null;
 
-              const postbackUrl =
-                handleRows.length > 0
-                  ? handleRows[0].postback_url
-                  : null;
+          const proceedWithHandle = (handle, cb) => {
+            // generate + persist handle on publids if it doesn't have one yet
+            if (handle) return cb(handle);
 
-              const existingToken  = tokenRow ? tokenRow.api_token : null;
-              const existingApiUrl = tokenRow ? tokenRow.api_url   : null;
+            const newHandle = generatePublisherHandle();
+            db.query(
+              `UPDATE publids SET publisher_handle = ?, updated_at = NOW() WHERE pub_id = ?`,
+              [newHandle, publisher_id],
+              (errHandle) => {
+                if (errHandle) return res.status(500).json({ success: false, error: errHandle });
+                cb(newHandle);
+              }
+            );
+          };
 
-              // 3️⃣ Build tracking links
-              const generatedLink =
-                `https://track.pidmetric.com/click/${publisherHandle}` +
-                `?campaign_id=${campaign_id}` +
-                `&pub_id=${publisher_id}` +
-                `&gaid={gaid}` +
-                `&cid={click_id}` +
-                `&sub_pub={sub_pub}` +
-                `&source={source}`;
+          proceedWithHandle(publisherHandle, (resolvedHandle) => {
+            publisherHandle = resolvedHandle;
 
-              const impressionLink =
-                `https://track.pidmetric.com/impression/${publisherHandle}` +
-                `?campaign_id=${campaign_id}` +
-                `&pub_id=${publisher_id}` +
-                `&gaid={gaid}` +
-                `&imp_id={imp_id}` +
-                `&sub_pub={sub_pub}` +
-                `&source={source}`;
+            // 3️⃣ Build tracking links
+            const generatedLink =
+              `https://track.pidmetric.com/click/${publisherHandle}` +
+              `?campaign_id=${campaign_id}` +
+              `&pub_id=${publisher_id}` +
+              `&gaid={gaid}` +
+              `&cid={click_id}` +
+              `&sub_pub={sub_pub}` +
+              `&source={source}`;
 
-              // 4️⃣ Insert new row
-              db.query(
-                `INSERT INTO publisher_links
-                 (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
-                [
-                  campaign_id,
-                  publisher_id,
-                  publisherHandle,
-                  generatedLink,
-                  impressionLink,
-                  postbackUrl,
-                  hide_referrer ? 1 : 0,
-                  existingToken,
-                  existingApiUrl,
-                  user_id || null
-                ],
-                (err3) => {
-                  if (err3) return res.status(500).json({ success: false, error: err3 });
+            const impressionLink =
+              `https://track.pidmetric.com/impression/${publisherHandle}` +
+              `?campaign_id=${campaign_id}` +
+              `&pub_id=${publisher_id}` +
+              `&gaid={gaid}` +
+              `&imp_id={imp_id}` +
+              `&sub_pub={sub_pub}` +
+              `&source={source}`;
 
-                  return res.json({
-                    success: true,
-                    message: "Publisher link generated successfully",
-                    publisher_handle: publisherHandle,
-                    postback_url: postbackUrl,
-                    publisher_link: generatedLink,
-                    impression_link: impressionLink
-                  });
-                }
-              );
-            }
-          );
+            // 4️⃣ Insert new row — values copied in from publids
+            db.query(
+              `INSERT INTO publisher_links
+               (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
+              [
+                campaign_id,
+                publisher_id,
+                publisherHandle,
+                generatedLink,
+                impressionLink,
+                postbackUrl,
+                hide_referrer ? 1 : 0,
+                existingToken,
+                existingApiUrl,
+                user_id || null
+              ],
+              (err3) => {
+                if (err3) return res.status(500).json({ success: false, error: err3 });
+
+                return res.json({
+                  success: true,
+                  message: "Publisher link generated successfully",
+                  publisher_handle: publisherHandle,
+                  postback_url: postbackUrl,
+                  publisher_link: generatedLink,
+                  impression_link: impressionLink
+                });
+              }
+            );
+          });
         }
       );
     }

@@ -786,9 +786,9 @@ console.log("api hit",req.body);
     }
 
     const sql = `
-      UPDATE publisher_links
+      UPDATE publids
       SET postback_url = ?, user_id = ?, updated_at = NOW()
-      WHERE publisher_id = ?
+      WHERE pub_id = ?
     `;
     console.log("query running");
 

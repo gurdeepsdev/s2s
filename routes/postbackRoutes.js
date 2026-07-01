@@ -4,6 +4,7 @@ const controller = require("../controllers/postbackController");
 
 router.get("/", controller.handlePostback);
 router.put('/place-link', controller.updatePlaceLink);
+router.put('/event-place-link', controller.updateEventPlaceLink);
 
 
 module.exports = router;

@@ -921,7 +921,7 @@ exports.generatePublisherLink = (req, res) => {
       // No row → generate fresh links and insert
       // 2️⃣ Read publisher-level data from publids (source of truth)
       db.query(
-        `SELECT publisher_handle, postback_url, api_token, api_url
+        `SELECT publisher_handle, postback_url, event_postback_url, api_token, api_url
          FROM publids
          WHERE pub_id = ?
          LIMIT 1`,
@@ -938,10 +938,11 @@ exports.generatePublisherLink = (req, res) => {
 
           const publidRow = publidRows[0];
 
-          let publisherHandle = publidRow.publisher_handle;
-          const postbackUrl   = publidRow.postback_url || null;
-          const existingToken = publidRow.api_token     || null;
-          const existingApiUrl = publidRow.api_url      || null;
+          let publisherHandle    = publidRow.publisher_handle;
+          const postbackUrl      = publidRow.postback_url       || null;
+          const eventPostbackUrl = publidRow.event_postback_url || null;
+          const existingToken    = publidRow.api_token          || null;
+          const existingApiUrl   = publidRow.api_url            || null;
 
           const proceedWithHandle = (handle, cb) => {
             // generate + persist handle on publids if it doesn't have one yet
@@ -983,8 +984,8 @@ exports.generatePublisherLink = (req, res) => {
             // 4️⃣ Insert new row — values copied in from publids
             db.query(
               `INSERT INTO publisher_links
-               (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
+               (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, event_postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
               [
                 campaign_id,
                 publisher_id,
@@ -992,6 +993,7 @@ exports.generatePublisherLink = (req, res) => {
                 generatedLink,
                 impressionLink,
                 postbackUrl,
+                eventPostbackUrl,
                 hide_referrer ? 1 : 0,
                 existingToken,
                 existingApiUrl,

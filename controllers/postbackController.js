@@ -772,6 +772,42 @@ console.log("Publisher postback URL:", postbackUrl);
 }
 
 
+exports.updateEventPlaceLink = (req, res) => {
+  try {
+    const { pub_id, user_id, event_postback_url } = req.body;
+    console.log("event-place-link api hit", req.body);
+
+    if (!pub_id || !user_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'pub_id and user_id are required',
+      });
+    }
+
+    const sql = `
+      UPDATE publids
+      SET event_postback_url = ?, user_id = ?, updated_at = NOW()
+      WHERE pub_id = ?
+    `;
+
+    db.query(sql, [event_postback_url || null, user_id, pub_id], (err, result) => {
+      if (err) {
+        console.error('updateEventPlaceLink DB error:', err);
+        return res.status(500).json({ success: false, message: 'Database error' });
+      }
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ success: false, message: 'Publisher not found' });
+      }
+
+      return res.json({ success: true, message: 'Event postback URL updated successfully' });
+    });
+  } catch (error) {
+    console.error('updateEventPlaceLink error:', error);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 exports.updatePlaceLink = (req, res) => {
   try {
     const { pub_id, user_id, place_link } = req.body;

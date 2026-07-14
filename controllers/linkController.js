@@ -962,54 +962,65 @@ exports.generatePublisherLink = (req, res) => {
           proceedWithHandle(publisherHandle, (resolvedHandle) => {
             publisherHandle = resolvedHandle;
 
-            // 3️⃣ Build tracking links
-            const generatedLink =
-              `https://track.pidmetric.com/click/${publisherHandle}` +
-              `?campaign_id=${campaign_id}` +
-              `&pub_id=${publisher_id}` +
-              `&gaid={gaid}` +
-              `&cid={click_id}` +
-              `&sub_pub={sub_pub}` +
-              `&source={source}`;
-
-            const impressionLink =
-              `https://track.pidmetric.com/impression/${publisherHandle}` +
-              `?campaign_id=${campaign_id}` +
-              `&pub_id=${publisher_id}` +
-              `&gaid={gaid}` +
-              `&imp_id={imp_id}` +
-              `&sub_pub={sub_pub}` +
-              `&source={source}`;
-
-            // 4️⃣ Insert new row — values copied in from publids
+            // 3️⃣ Check if campaign has advertiser_impression_url before building impression link
             db.query(
-              `INSERT INTO publisher_links
-               (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, event_postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
-              [
-                campaign_id,
-                publisher_id,
-                publisherHandle,
-                generatedLink,
-                impressionLink,
-                postbackUrl,
-                eventPostbackUrl,
-                hide_referrer ? 1 : 0,
-                existingToken,
-                existingApiUrl,
-                user_id || null
-              ],
-              (err3) => {
-                if (err3) return res.status(500).json({ success: false, error: err3 });
+              `SELECT advertiser_impression_url FROM advertiser_links WHERE campaign_id = ? LIMIT 1`,
+              [campaign_id],
+              (errAdv, advRows) => {
+                if (errAdv) return res.status(500).json({ success: false, error: errAdv });
 
-                return res.json({
-                  success: true,
-                  message: "Publisher link generated successfully",
-                  publisher_handle: publisherHandle,
-                  postback_url: postbackUrl,
-                  publisher_link: generatedLink,
-                  impression_link: impressionLink
-                });
+                const hasImpressionUrl = advRows.length > 0 && !!advRows[0].advertiser_impression_url;
+
+                const generatedLink =
+                  `https://track.pidmetric.com/click/${publisherHandle}` +
+                  `?campaign_id=${campaign_id}` +
+                  `&pub_id=${publisher_id}` +
+                  `&gaid={gaid}` +
+                  `&cid={click_id}` +
+                  `&sub_pub={sub_pub}` +
+                  `&source={source}`;
+
+                const impressionLink = hasImpressionUrl
+                  ? `https://track.pidmetric.com/impression/${publisherHandle}` +
+                    `?campaign_id=${campaign_id}` +
+                    `&pub_id=${publisher_id}` +
+                    `&gaid={gaid}` +
+                    `&imp_id={imp_id}` +
+                    `&sub_pub={sub_pub}` +
+                    `&source={source}`
+                  : null;
+
+                // 4️⃣ Insert new row — values copied in from publids
+                db.query(
+                  `INSERT INTO publisher_links
+                   (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
+                  [
+                    campaign_id,
+                    publisher_id,
+                    publisherHandle,
+                    generatedLink,
+                    impressionLink,
+                    postbackUrl,
+                    eventPostbackUrl,
+                    hide_referrer ? 1 : 0,
+                    existingToken,
+                    existingApiUrl,
+                    user_id || null
+                  ],
+                  (err3) => {
+                    if (err3) return res.status(500).json({ success: false, error: err3 });
+
+                    return res.json({
+                      success: true,
+                      message: "Publisher link generated successfully",
+                      publisher_handle: publisherHandle,
+                      postback_url: postbackUrl,
+                      publisher_link: generatedLink,
+                      impression_link: impressionLink
+                    });
+                  }
+                );
               }
             );
           });

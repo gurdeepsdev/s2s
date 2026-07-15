@@ -893,26 +893,40 @@ exports.generatePublisherLink = (req, res) => {
     (err, existingRows) => {
       if (err) return res.status(500).json({ success: false, error: err });
 
-      // Row exists → just approve it, return existing links
+      // Row exists → approve it and sync api_token from publids
       if (existingRows.length > 0) {
         const existing = existingRows[0];
 
+        // Pull latest token from publids so the offers API can find it
         db.query(
-          `UPDATE publisher_links
-           SET status = 'approved', updated_at = NOW(), user_id = ?
-           WHERE publisher_id = ? AND campaign_id = ?`,
-          [user_id || null, publisher_id, campaign_id],
-          (errUpd) => {
-            if (errUpd) return res.status(500).json({ success: false, error: errUpd });
+          `SELECT api_token, api_url FROM publids WHERE pub_id = ? LIMIT 1`,
+          [publisher_id],
+          (errPub, publidRows) => {
+            if (errPub) return res.status(500).json({ success: false, error: errPub });
 
-            return res.json({
-              success: true,
-              message: "Publisher approved successfully",
-              publisher_handle: existing.publisher_handle,
-              postback_url: existing.postback_url,
-              publisher_link: existing.generated_link,
-              impression_link: existing.impression_link
-            });
+            const latestToken  = publidRows.length > 0 ? publidRows[0].api_token  : null;
+            const latestApiUrl = publidRows.length > 0 ? publidRows[0].api_url    : null;
+
+            db.query(
+              `UPDATE publisher_links
+               SET status = 'approved', updated_at = NOW(), user_id = ?,
+                   api_token = COALESCE(?, api_token),
+                   api_url   = COALESCE(?, api_url)
+               WHERE publisher_id = ? AND campaign_id = ?`,
+              [user_id || null, latestToken, latestApiUrl, publisher_id, campaign_id],
+              (errUpd) => {
+                if (errUpd) return res.status(500).json({ success: false, error: errUpd });
+
+                return res.json({
+                  success: true,
+                  message: "Publisher approved successfully",
+                  publisher_handle: existing.publisher_handle,
+                  postback_url: existing.postback_url,
+                  publisher_link: existing.generated_link,
+                  impression_link: existing.impression_link
+                });
+              }
+            );
           }
         );
         return;

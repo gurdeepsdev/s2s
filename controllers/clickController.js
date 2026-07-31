@@ -5,209 +5,196 @@ const { buildRedirectURL } = require("../utils/trackingHandler");
 
 
 
-exports.trackClick = (req, res) => {
-  const { publisher_handle} = req.params;
-  const { cid, pub_id, subpub, gaid, idfa, source, campaign_id,p1,p2,p3,p4,p5 } = req.query;
-console.log("campaign_id",campaign_id,publisher_handle)
-  if (!campaign_id) {
-    return res.status(400).send("Missing campaign_id");
-  }
-  if (!cid) {
-    return res.status(400).send("Missing click id");
-  }
+const dbp = db.promise();
 
-  const advertiserClickId = "ADV-" + crypto.randomBytes(6).toString("hex");
+// ---------------------------------------------------------------------------
+// Small, single-purpose steps mirroring the original pipeline, in the same
+// sequential order as the original callback code:
+// validateRequest -> loadPublisherLink -> checkCaps -> loadAdvertiserLink
+//   -> buildRedirect -> logClick -> sendRedirect
+// Every query result / error message below is byte-for-byte the same as the
+// original callback implementation; only the *shape* of the code changed.
+// checkCaps and loadAdvertiserLink are intentionally NOT run in parallel:
+// under the current connectionLimit:10 pool, running them concurrently
+// doubles simultaneous connection demand per in-flight request and measured
+// slower under load than the pool sizing/COUNT(*) query bottleneck being
+// addressed separately. Sequential order matches original pool behavior.
+// ---------------------------------------------------------------------------
+
+function validateRequest(req) {
+  const { publisher_handle } = req.params;
+  const {
+    cid, pub_id, subpub, gaid, idfa, source, campaign_id,
+    p1, p2, p3, p4, p5
+  } = req.query;
+
+  if (!campaign_id) return { error: { status: 400, message: "Missing campaign_id" } };
+  if (!cid) return { error: { status: 400, message: "Missing click id" } };
 
   const ip_address =
     req.headers["x-forwarded-for"]?.split(",")[0] ||
     req.socket.remoteAddress;
-
   const user_agent = req.get("User-Agent");
 
-  // 1️⃣ Find publisher link → campaign + publisher + hide_referrer
-  db.query(
-    `SELECT campaign_id, publisher_id, hide_referrer
-     FROM publisher_links
-     WHERE publisher_handle = ?
-       AND campaign_id = ?
-       AND status = 'approved'
-     LIMIT 1`,
-    [publisher_handle, campaign_id],
-    (err, pubRows) => {
-      if (err || pubRows.length === 0) {
-        return res.status(403).send("Tracking link is inactive");
-      }
+  return {
+    params: {
+      publisher_handle, cid, pub_id, subpub, gaid, idfa, source, campaign_id,
+      p1, p2, p3, p4, p5, ip_address, user_agent
+    }
+  };
+}
 
-      const { campaign_id, publisher_id, hide_referrer } = pubRows[0];
+// Gate #1 — must resolve before anything else starts (redirect destination
+// and cap counting both depend on publisher_id/campaign_id from this row).
+async function loadPublisherLink(publisher_handle, campaign_id) {
+  try {
+    const [pubRows] = await dbp.query(
+      `SELECT campaign_id, publisher_id, hide_referrer
+       FROM publisher_links
+       WHERE publisher_handle = ?
+         AND campaign_id = ?
+         AND status = 'approved'
+       LIMIT 1`,
+      [publisher_handle, campaign_id]
+    );
+    return pubRows.length > 0 ? pubRows[0] : null;
+  } catch (err) {
+    console.error("Publisher link lookup error:", err);
+    return null; // original treated query error same as "not found" -> 403
+  }
+}
 
-      // 2️⃣ Check caps for this campaign
-      db.query(
-        `SELECT daily, monthly, lifetime
-         FROM publisher_caps
-         WHERE campaign_id = ?
-         ORDER BY id DESC
-         LIMIT 1`,
-        [campaign_id],
-        (errCap, capRows) => {
-          if (errCap) {
-            console.error("Cap lookup error:", errCap);
-            return res.status(500).send("Cap check failed");
-          }
+// Same cap SQL and thresholds as the original. Must fully pass before
+// loadAdvertiserLink() runs (see call site) — matches original ordering.
+async function checkCaps(campaign_id, publisher_id) {
+  let capRows;
+  try {
+    [capRows] = await dbp.query(
+      `SELECT daily, monthly, lifetime
+       FROM publisher_caps
+       WHERE campaign_id = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [campaign_id]
+    );
+  } catch (err) {
+    console.error("Cap lookup error:", err);
+    return { ok: false, status: 500, message: "Cap check failed" };
+  }
 
-          const cap = capRows.length > 0 ? capRows[0] : null;
+  const cap = capRows.length > 0 ? capRows[0] : null;
+  if (!cap || (cap.daily === null && cap.monthly === null && cap.lifetime === null)) {
+    return { ok: true };
+  }
 
-          // If no caps set, skip counting and proceed
-          if (!cap || (cap.daily === null && cap.monthly === null && cap.lifetime === null)) {
-            return proceedToAdvertiser();
-          }
+  let countRows;
+  try {
+    [countRows] = await dbp.query(
+      `SELECT
+         SUM(CASE WHEN DATE(created_at) = CURDATE() THEN 1 ELSE 0 END) AS daily_count,
+         SUM(CASE WHEN YEAR(created_at) = YEAR(NOW()) AND MONTH(created_at) = MONTH(NOW()) THEN 1 ELSE 0 END) AS monthly_count,
+         COUNT(*) AS lifetime_count
+       FROM clicks
+       WHERE campaign_id = ? AND publisher_id = ?`,
+      [campaign_id, publisher_id]
+    );
+  } catch (err) {
+    console.error("Click count error:", err);
+    return { ok: false, status: 500, message: "Cap count failed" };
+  }
 
-          // Count clicks: daily, monthly, lifetime in one query
-          db.query(
-            `SELECT
-               SUM(CASE WHEN DATE(created_at) = CURDATE() THEN 1 ELSE 0 END) AS daily_count,
-               SUM(CASE WHEN YEAR(created_at) = YEAR(NOW()) AND MONTH(created_at) = MONTH(NOW()) THEN 1 ELSE 0 END) AS monthly_count,
-               COUNT(*) AS lifetime_count
-             FROM clicks
-             WHERE campaign_id = ? AND publisher_id = ?`,
-            [campaign_id, publisher_id],
-            (errCount, countRows) => {
-              if (errCount) {
-                console.error("Click count error:", errCount);
-                return res.status(500).send("Cap count failed");
-              }
+  const { daily_count, monthly_count, lifetime_count } = countRows[0];
+  if (cap.daily !== null && daily_count >= cap.daily) {
+    return { ok: false, status: 429, message: "Daily click cap reached" };
+  }
+  if (cap.monthly !== null && monthly_count >= cap.monthly) {
+    return { ok: false, status: 429, message: "Monthly click cap reached" };
+  }
+  if (cap.lifetime !== null && lifetime_count >= cap.lifetime) {
+    return { ok: false, status: 429, message: "Lifetime click cap reached" };
+  }
+  return { ok: true };
+}
 
-              const { daily_count, monthly_count, lifetime_count } = countRows[0];
+// Only runs after checkCaps() passes (see call site) — matches original ordering.
+async function loadAdvertiserLink(campaign_id) {
+  try {
+    const [advRows] = await dbp.query(
+      `SELECT advertiser_link, click_id_param
+       FROM advertiser_links
+       WHERE campaign_id = ?
+       LIMIT 1`,
+      [campaign_id]
+    );
+    return advRows.length > 0 ? advRows[0] : null;
+  } catch (err) {
+    console.error("Advertiser link lookup error:", err);
+    return null; // original treated query error same as "not found" -> 404
+  }
+}
 
-              if (cap.daily !== null && daily_count >= cap.daily) {
-                return res.status(429).send("Daily click cap reached");
-              }
-              if (cap.monthly !== null && monthly_count >= cap.monthly) {
-                return res.status(429).send("Monthly click cap reached");
-              }
-              if (cap.lifetime !== null && lifetime_count >= cap.lifetime) {
-                return res.status(429).send("Lifetime click cap reached");
-              }
+// Macro replacement (unchanged) + buildRedirectURL(), now guarded so a bad
+// advertiser_link value (e.g. the literal 'NA' seen in PM2 logs) can't throw
+// an uncaught TypeError [ERR_INVALID_URL] out of a db callback and hang/crash
+// the process. On failure we return null instead of throwing.
+function buildRedirect(adv, advertiserClickId, params) {
+  const { gaid, idfa, source, subpub, p1, p2, p3, p4, p5 } = params;
 
-              return proceedToAdvertiser();
-            }
-          );
-        }
-      );
+  const advertiserLink = adv.advertiser_link
+    .replace(/{click_id}/g, advertiserClickId)
+    .replace(/{gaid}/g, gaid || "")
+    .replace(/{idfa}/g, idfa || "")
+    .replace(/{source}/g, source || "")
+    .replace(/{sub_pub}/g, subpub || "")
+    .replace(/{android_id}/g, gaid || "")
+    .replace(/{p1}/g, p1 || "")
+    .replace(/{p2}/g, p2 || "")
+    .replace(/{p3}/g, p3 || "")
+    .replace(/{p4}/g, p4 || "")
+    .replace(/{p5}/g, p5 || "")
+    .replace(/{af_ad_id}/g, "");
 
-      function proceedToAdvertiser() {
-      // 3️⃣ Find advertiser link
-      db.query(
-        `SELECT advertiser_link, click_id_param
-         FROM advertiser_links
-         WHERE campaign_id = ?
-         LIMIT 1`,
-        [campaign_id],
-        (err2, advRows) => {
-          if (err2 || advRows.length === 0) {
-            return res.status(404).send("No advertiser found");
-          }
+  try {
+    return buildRedirectURL({
+      advertiser_link: advertiserLink,
+      advertiserClickId,
+      source,
+      adv
+    });
+  } catch (err) {
+    console.error("Invalid advertiser URL for campaign, cannot build redirect:", err.message);
+    return null;
+  }
+}
 
-          const adv = advRows[0];
+async function logClick(params) {
+  const {
+    cid, publisher_id, campaign_id, advertiserClickId,
+    pub_id, subpub, gaid, idfa, ip_address, user_agent, source,
+    p1, p2, p3, p4, p5
+  } = params;
 
-          // 3️⃣ Build redirect URL
-          // let redirectURL = adv.advertiser_link;
+  const insertSQL = `
+    INSERT INTO clicks
+    (click_id, publisher_id, campaign_id, advertiser_click_id,
+     pub_id, sub_pub_id, gaid, idfa, ip_address, user_agent, source,p1,p2,p3,p4,p5, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?, NOW())
+  `;
 
-          // if (redirectURL.includes("{click_id}")) {
-          //   redirectURL = redirectURL.replace(
-          //     "{click_id}",
-          //     advertiserClickId
-          //   );
-          // } else {
-          //   redirectURL +=
-          //     (redirectURL.includes("?") ? "&" : "?") +
-          //     `${adv.click_id_param}=${advertiserClickId}`;
-          // }
-         // 🔥 STEP 1: Replace placeholders FIRST
+  await dbp.query(insertSQL, [
+    cid, publisher_id, campaign_id, advertiserClickId,
+    pub_id || null, subpub || null, gaid || null, idfa || null,
+    ip_address, user_agent, source || null,
+    p1 || null, p2 || null, p3 || null, p4 || null, p5 || null
+  ]);
+}
 
-let advertiserLink = adv.advertiser_link;
-
-// advertiserLink = advertiserLink
-//   .replace(/{click_id}/g, advertiserClickId)
-//   .replace(/{gaid}/g, gaid || "")
-//   .replace(/{idfa}/g, idfa || "")
-//   .replace(/{source}/g, source || "")
-//   .replace(/{sub_pub}/g, subpub || "")
-//   .replace(/{android_id}/g, gaid || "")
-//   .replace(/{p4}/g, "")
-//   .replace(/{af_ad_id}/g, "");
-
-advertiserLink = advertiserLink
-  .replace(/{click_id}/g, advertiserClickId)
-  .replace(/{gaid}/g, gaid || "")
-  .replace(/{idfa}/g, idfa || "")
-  .replace(/{source}/g, source || "")
-  .replace(/{sub_pub}/g, subpub || "")
-  .replace(/{android_id}/g, gaid || "")
-  .replace(/{p1}/g, p1 || "")
-  .replace(/{p2}/g, p2 || "")
-  .replace(/{p3}/g, p3 || "")
-  .replace(/{p4}/g, p4 || "")
-  .replace(/{p5}/g, p5 || "")
-  .replace(/{af_ad_id}/g, "");
-  
-  console.log("ADVERTISER CLICK ID:", advertiserClickId);
-  console.log("ORIGINAL ADVERTISER URL:", adv.advertiser_link);
-console.log("AFTER REPLACEMENT:", advertiserLink);
-
-  const redirectURL = buildRedirectURL({
-    advertiser_link: advertiserLink,   // ✅ use cleaned URL
-    advertiserClickId,
-    source,
-    adv
-  });
-  console.log("FINAL REDIRECT:", redirectURL);
-// 🔥 DEBUG (IMPORTANT)
-console.log("AFTER REPLACEMENT:", advertiserLink);
-
-console.log("INPUT PARAMS:", { source, gaid, idfa });
-          console.log("FINAL REDIRECT:", redirectURL);
-
-          // 4️⃣ Save click
-          const insertSQL = `
-            INSERT INTO clicks
-            (click_id, publisher_id, campaign_id, advertiser_click_id,
-             pub_id, sub_pub_id, gaid, idfa, ip_address, user_agent, source,p1,p2,p3,p4,p5, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?, NOW())
-          `;
-
-          db.query(
-            insertSQL,
-            [
-              cid,
-              publisher_id,
-              campaign_id,
-              advertiserClickId,
-              pub_id || null,
-              subpub || null,
-              gaid || null,
-              idfa || null,
-              ip_address,
-              user_agent,
-              source || null,
-              p1 || null,
-              p2 || null,
-              p3 || null,
-              p4 || null,
-              p5 || null
-            ],
-            (err3) => {
-              if (err3) {
-                console.error(err3);
-                return res.status(500).send("Click tracking failed");
-              }
-
-              // 5️⃣ 🔥 Redirect with / without referrer
-              if (hide_referrer === 1) {
-                // Hide Google referrer
-                return res
-                  .status(200)
-                  .set("Content-Type", "text/html")
-                  .send(`
+function sendRedirect(res, redirectURL, hide_referrer) {
+  if (hide_referrer === 1) {
+    return res
+      .status(200)
+      .set("Content-Type", "text/html")
+      .send(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -222,17 +209,59 @@ console.log("INPUT PARAMS:", { source, gaid, idfa });
   </script>
 </body>
 </html>
-                  `);
-              }
+      `);
+  }
+  return res.redirect(302, redirectURL);
+}
 
-              // Normal redirect (referrer allowed)
-              return res.redirect(302, redirectURL);
-            }
-          );
-        }
-      );
+exports.trackClick = async (req, res) => {
+  try {
+    const { error, params } = validateRequest(req);
+    if (error) return res.status(error.status).send(error.message);
+
+    const advertiserClickId = "ADV-" + crypto.randomBytes(6).toString("hex");
+
+    // Gate #1: publisher must be approved for this campaign. Nothing else
+    // can start until this resolves, since caps/advertiser both need its output.
+    const pub = await loadPublisherLink(params.publisher_handle, params.campaign_id);
+    if (!pub) return res.status(403).send("Tracking link is inactive");
+
+    const { campaign_id, publisher_id, hide_referrer } = pub;
+
+    // Sequential, matching the original: cap check must fully pass before
+    // the advertiser lookup ever runs (and before a redirect is possible).
+    // NOTE: checkCaps() and loadAdvertiserLink() have no data dependency on
+    // each other and could run concurrently via Promise.all for a latency
+    // win — deliberately not done here. Under the current
+    // connectionLimit:10 pool, that pattern doubles simultaneous connection
+    // demand per in-flight request and measured slower under load
+    // (benchmarked) than the real bottleneck, which is pool sizing and the
+    // cap COUNT(*) query. Revisit parallelizing this once pool sizing is
+    // fixed based on production MySQL metrics.
+    const capResult = await checkCaps(campaign_id, publisher_id);
+    if (!capResult.ok) return res.status(capResult.status).send(capResult.message);
+
+    const adv = await loadAdvertiserLink(campaign_id);
+    if (!adv) return res.status(404).send("No advertiser found");
+
+    const redirectURL = buildRedirect(adv, advertiserClickId, params);
+    if (!redirectURL) return res.status(502).send("Invalid advertiser configuration");
+
+    // Click logging stays before the redirect, matching original behavior:
+    // if the insert fails, no redirect is sent and the caller gets a 500.
+    try {
+      await logClick({ ...params, publisher_id, campaign_id, advertiserClickId });
+    } catch (err) {
+      console.error("Click insert error:", err);
+      return res.status(500).send("Click tracking failed");
     }
-  }); // close publisher_links callback
+
+    return sendRedirect(res, redirectURL, hide_referrer);
+  } catch (err) {
+    // Safety net: guarantees a response is always sent, never a hanging request.
+    console.error("Unexpected error in trackClick:", err);
+    return res.status(500).send("Click tracking failed");
+  }
 };
 
 

@@ -1007,8 +1007,8 @@ exports.generatePublisherLink = (req, res) => {
                 // 4️⃣ Insert new row — values copied in from publids
                 db.query(
                   `INSERT INTO publisher_links
-                   (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
+                   (campaign_id, publisher_id, publisher_handle, generated_link, impression_link, postback_url, event_postback_url, hide_referrer, status, api_token, api_url, user_id, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, NOW())`,
                   [
                     campaign_id,
                     publisher_id,
@@ -1030,6 +1030,7 @@ exports.generatePublisherLink = (req, res) => {
                       message: "Publisher link generated successfully",
                       publisher_handle: publisherHandle,
                       postback_url: postbackUrl,
+                      event_postback_url: eventPostbackUrl,
                       publisher_link: generatedLink,
                       impression_link: impressionLink
                     });
